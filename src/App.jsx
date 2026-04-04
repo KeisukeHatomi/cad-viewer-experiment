@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import StepViewer from './components/StepViewer'
+import DxfViewer from './components/DxfViewer'
 
 const DEFAULT_COLORS = {
   background: '#f0f0f0',
@@ -79,14 +80,26 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // 親ウィンドウに「ビューア準備完了」を通知
+  useEffect(() => {
+    window.parent?.postMessage({ type: 'viewerReady' }, '*')
+  }, [])
+
   useEffect(() => {
     function onMessage(e) {
       const msg = e.data
-      if (!msg || msg.type !== 'loadStep') return
+      if (!msg) return
       if (!(msg.buffer instanceof ArrayBuffer)) return
-      const blob = new Blob([msg.buffer])
-      const virtualFile = new File([blob], msg.name || 'model.stp')
-      setFile(virtualFile)
+      // loadStep / loadDxf どちらも受け付ける
+      if (msg.type === 'loadStep') {
+        const blob = new Blob([msg.buffer])
+        const virtualFile = new File([blob], msg.name || 'model.stp')
+        setFile(virtualFile)
+      } else if (msg.type === 'loadDxf') {
+        const blob = new Blob([msg.buffer])
+        const virtualFile = new File([blob], msg.name || 'drawing.dxf')
+        setFile(virtualFile)
+      }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
@@ -99,6 +112,7 @@ function App() {
   }
 
   const isStep = Boolean(file?.name?.toLowerCase().match(/\.(step|stp)$/))
+  const isDxf  = Boolean(file?.name?.toLowerCase().match(/\.dxf$/))
 
   return (
     <div className="flex flex-col" style={{ height: '100%', background: '#f5f5f5', color: '#1a1a1a' }}>
@@ -107,7 +121,7 @@ function App() {
         <div className="flex items-center gap-2">
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: '0.18em', color: '#6b7280', textTransform: 'uppercase' }}>CAD</span>
           <span style={{ width: 1, height: 14, background: '#e5e7eb', display: 'inline-block' }} />
-          <h1 style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 17, fontWeight: 600, color: '#111827', letterSpacing: '-0.01em' }}>STEP Viewer</h1>
+          <h1 style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 17, fontWeight: 600, color: '#111827', letterSpacing: '-0.01em' }}>CAD Viewer</h1>
         </div>
         {file && (
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#6b7280', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, padding: '2px 10px' }} className="truncate max-w-xs">
@@ -116,7 +130,7 @@ function App() {
         )}
         {showFileOpen && (
           <div style={{ marginLeft: 'auto' }}>
-            <input id="fileInput" type="file" className="hidden" accept=".step,.stp" onChange={handleFileDrop} />
+            <input id="fileInput" type="file" className="hidden" accept=".step,.stp,.dxf" onChange={handleFileDrop} />
             <button
               onClick={() => { document.getElementById('fileInput').value = ''; document.getElementById('fileInput').click() }}
               style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 14, fontWeight: 500, color: '#374151', background: '#ffffff', border: '1px solid #d1d5db', borderRadius: 7, padding: '6px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 180ms' }}
@@ -148,7 +162,7 @@ function App() {
               <path d={d} stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           ))}
-          <p style={{ color: '#6b7280', fontSize: 15, fontWeight: 500 }}>STEP / STP ファイルをドロップ or クリックして選択</p>
+          <p style={{ color: '#6b7280', fontSize: 15, fontWeight: 500 }}>STEP / STP / DXF ファイルをドロップ or クリックして選択</p>
           <p style={{ color: '#9ca3af', fontSize: 12, marginTop: 5, fontFamily: "'JetBrains Mono', monospace" }}>または親アプリから postMessage で受け取ります</p>
         </div>
       )}
@@ -184,9 +198,10 @@ function App() {
           </div>
         )}
         {file && isStep && <StepViewer file={file} colors={colors} lights={lights} />}
-        {file && !isStep && (
+        {file && isDxf  && <DxfViewer  file={file} />}
+        {file && !isStep && !isDxf && (
           <div className="h-full flex items-center justify-center" style={{ color: '#ef4444', fontSize: 13 }}>
-            STEP ファイルを選択してください（拡張子: .step / .stp）
+            対応フォーマット: .step / .stp / .dxf
           </div>
         )}
       </div>
