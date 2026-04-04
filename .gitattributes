@@ -1,0 +1,10 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Binary files - no line ending conversion
+*.wasm binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.svg  binary
