@@ -10,6 +10,75 @@ import { TrackballControls } from 'three/addons/controls/TrackballControls.js'
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 
+// ツールバーアイコン (Shapr3D スタイル — 18×18 inline SVG)
+const ICONS = {
+  navigate: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <path d="M4.5 2L4.5 15.5L7.8 12L10 17.5L12.2 16.5L10 11.5L14.5 11.5Z"
+        stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/>
+    </svg>
+  ),
+  measure: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <line x1="3" y1="10" x2="17" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      <line x1="3"  y1="7"  x2="3"  y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      <line x1="17" y1="7"  x2="17" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    </svg>
+  ),
+  comment: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <path d="M4 3.5h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H8l-4 3.5V4.5a1 1 0 0 1 1-1z"
+        stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/>
+    </svg>
+  ),
+  shaded: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <rect x="4" y="4" width="12" height="12" rx="2.5" fill="currentColor"/>
+    </svg>
+  ),
+  'shaded-edges': (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <rect x="4" y="4" width="12" height="12" rx="2.5" fill="currentColor" opacity="0.22"/>
+      <rect x="4" y="4" width="12" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.75"/>
+    </svg>
+  ),
+  hiddenline: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <rect x="4" y="4" width="12" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.5"/>
+      <line x1="4.5" y1="10" x2="15.5" y2="10" stroke="currentColor" strokeWidth="1" strokeDasharray="2.5 2"/>
+      <line x1="10"  y1="4.5" x2="10" y2="15.5" stroke="currentColor" strokeWidth="1" strokeDasharray="2.5 2"/>
+    </svg>
+  ),
+  wireframe: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <rect x="4" y="4" width="12" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.5"/>
+      <line x1="8"  y1="4"  x2="8"  y2="16" stroke="currentColor" strokeWidth="1"/>
+      <line x1="12" y1="4"  x2="12" y2="16" stroke="currentColor" strokeWidth="1"/>
+      <line x1="4"  y1="8"  x2="16" y2="8"  stroke="currentColor" strokeWidth="1"/>
+      <line x1="4"  y1="12" x2="16" y2="12" stroke="currentColor" strokeWidth="1"/>
+    </svg>
+  ),
+}
+
+// ViewCube 面定義 (Z-up CAD 座標系)
+// cssTransform: CSS 3D での面の向き  dirArr: スナップ時のカメラ方向  upArr: スナップ時の up ベクトル
+const CUBE_H = 30  // 60px キューブの半サイズ
+// cssTransform の CSS ローカル法線 → Three.js ワールド方向 の対応:
+//   translateZ        → CSS +Z → Three.js +Z (上)
+//   rotateY(180)translateZ → CSS -Z → Three.js -Z (下)
+//   rotateY(-90)translateZ → CSS +X → Three.js +X (右)
+//   rotateY(90) translateZ → CSS -X → Three.js -X (左)
+//   rotateX(-90)translateZ → CSS +Y → Three.js +Y (正面)
+//   rotateX(90) translateZ → CSS -Y → Three.js -Y (背面)
+const CUBE_FACES = [
+  { key: 'top',    label: '上面', cssTransform: `translateZ(${CUBE_H}px)`,                dirArr: [ 0,  0,  1], upArr: [0, 1, 0] },
+  { key: 'bottom', label: '下面', cssTransform: `rotateY(180deg) translateZ(${CUBE_H}px)`, dirArr: [ 0,  0, -1], upArr: [0, 1, 0] },
+  { key: 'right',  label: '右面', cssTransform: `rotateY(-90deg) translateZ(${CUBE_H}px)`, dirArr: [-1,  0,  0], upArr: [0, 0, 1] },
+  { key: 'left',   label: '左面', cssTransform: `rotateY(90deg) translateZ(${CUBE_H}px)`,  dirArr: [ 1,  0,  0], upArr: [0, 0, 1] },
+  { key: 'front',  label: '正面', cssTransform: `rotateX(-90deg) translateZ(${CUBE_H}px)`, dirArr: [ 0, -1,  0], upArr: [0, 0, 1] },
+  { key: 'back',   label: '背面', cssTransform: `rotateX(90deg) translateZ(${CUBE_H}px)`,  dirArr: [ 0,  1,  0], upArr: [0, 0, 1] },
+]
+
 export default function StepViewer({ file, colors, lights }) {
   const mountRef = useRef(null)
   const [status, setStatus] = useState('idle') // 'idle'|'loading'|'ok'|'error'
@@ -87,6 +156,7 @@ export default function StepViewer({ file, colors, lights }) {
 
   // ドラッグ判定
   const mouseDownRef = useRef(null)
+  const viewCubeRef = useRef(null)
 
   // モード変更時: pending 状態のクリア
   useEffect(() => {
@@ -913,6 +983,87 @@ export default function StepViewer({ file, colors, lights }) {
     setCommentText('')
   }
 
+  // ViewCube: カメラ回転を CSS 3D キューブに同期
+  useEffect(() => {
+    let rafId
+    function sync() {
+      rafId = requestAnimationFrame(sync)
+      const cam = cameraRef.current
+      const el = viewCubeRef.current
+      if (!cam || !el) return
+      const e = cam.matrixWorldInverse.elements
+      // CSS Y軸は下向き、Three.js Y軸は上向きのため Y成分を反転して水平回転方向を合わせる
+      el.style.transform =
+        `matrix3d(${e[0]},${-e[1]},${e[2]},0,${-e[4]},${e[5]},${-e[6]},0,${e[8]},${-e[9]},${e[10]},0,0,0,0,1)`
+    }
+    sync()
+    return () => cancelAnimationFrame(rafId)
+  }, [])
+
+  // 標準ビューへスナップ（350ms easeInOutQuad）＋モデルフィット
+  function snapToView(dirArr, upArr) {
+    const cam = cameraRef.current
+    const ctrl = controlsRef.current
+    const container = mountRef.current
+    if (!cam || !ctrl || !solidGroupRef.current || !container) return
+
+    const endDir = new THREE.Vector3(...dirArr).normalize()
+    const endUp  = new THREE.Vector3(...upArr).normalize()
+
+    // バウンディングボックスの中心を常にターゲット・ビューの中心にする
+    const box    = new THREE.Box3().setFromObject(solidGroupRef.current)
+    const center = box.getCenter(new THREE.Vector3())
+
+    // カメラ距離はモデル対角線 × 余裕
+    const ms = modelSizeRef.current > 0 ? modelSizeRef.current : box.getSize(new THREE.Vector3()).length()
+    const d  = ms * 1.5
+    const endPos = center.clone().addScaledVector(endDir, d)
+
+    // エンドカメラ軸（lookAt で正確に算出）でコーナーを中心基準に投影 → frustumHalf 決定
+    const lookMat  = new THREE.Matrix4().lookAt(endPos, center, endUp)
+    const rightVec = new THREE.Vector3().setFromMatrixColumn(lookMat, 0)
+    const upVec    = new THREE.Vector3().setFromMatrixColumn(lookMat, 1)
+    const corners  = []
+    for (const x of [box.min.x, box.max.x])
+      for (const y of [box.min.y, box.max.y])
+        for (const z of [box.min.z, box.max.z])
+          corners.push(new THREE.Vector3(x, y, z))
+    let maxHX = 0, maxHY = 0
+    for (const c of corners) {
+      const rel = c.clone().sub(center)  // 中心基準
+      maxHX = Math.max(maxHX, Math.abs(rel.dot(rightVec)))
+      maxHY = Math.max(maxHY, Math.abs(rel.dot(upVec)))
+    }
+    const aspect   = container.clientWidth / container.clientHeight
+    const endFrustum = Math.max(maxHX / aspect, maxHY) * 1.43  // 30% 小さく + 10% パディング
+
+    const startPos     = cam.position.clone()
+    const startUp      = cam.up.clone()
+    const startTarget  = ctrl.target.clone()
+    const startFrustum = cam.userData.frustumHalf / cam.zoom  // zoom 正規化
+
+    // zoom を 1 にリセットして frustumHalf だけで制御
+    const T = 350, t0 = performance.now()
+    function frame(now) {
+      const t = Math.min((now - t0) / T, 1)
+      const e = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
+      cam.position.lerpVectors(startPos, endPos, e)
+      cam.up.lerpVectors(startUp, endUp, e).normalize()
+      const lerpTarget = startTarget.clone().lerp(center, e)
+      ctrl.target.copy(lerpTarget)
+      cam.lookAt(lerpTarget)
+      const fh = startFrustum + (endFrustum - startFrustum) * e
+      cam.zoom = 1
+      cam.userData.frustumHalf = fh
+      const asp = container.clientWidth / container.clientHeight
+      cam.left   = -fh * asp; cam.right  =  fh * asp
+      cam.top    =  fh;        cam.bottom = -fh
+      cam.updateProjectionMatrix()
+      if (t < 1) requestAnimationFrame(frame)
+    }
+    requestAnimationFrame(frame)
+  }
+
   const modeHint = mode === 'measure'
     ? (pendingPoint ? '2点目をクリックしてください' : '1点目をクリックしてください')
     : 'コメントを追加したい点をクリック'
@@ -931,12 +1082,13 @@ export default function StepViewer({ file, colors, lights }) {
           ].map(({ key, label, activeStyle }) => (
             <button
               key={key}
+              title={label}
               onClick={() => setMode(key)}
-              style={mode === key ? { ...activeStyle, borderRadius: 7, padding: '6px 16px', fontSize: 13, fontWeight: 500, fontFamily: "'Noto Sans JP', sans-serif", cursor: 'pointer', transition: 'all 180ms' } : { background: 'transparent', color: '#9ca3af', border: '1px solid transparent', borderRadius: 7, padding: '6px 16px', fontSize: 13, fontWeight: 500, fontFamily: "'Noto Sans JP', sans-serif", cursor: 'pointer', transition: 'all 180ms' }}
+              style={mode === key ? { ...activeStyle, borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { background: 'transparent', color: '#9ca3af', border: '1px solid transparent', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               onMouseEnter={e => { if (mode !== key) e.currentTarget.style.color = '#374151' }}
               onMouseLeave={e => { if (mode !== key) e.currentTarget.style.color = '#9ca3af' }}
             >
-              {label}
+              {ICONS[key]}
             </button>
           ))}
 
@@ -952,14 +1104,15 @@ export default function StepViewer({ file, colors, lights }) {
           ].map(({ key, label }) => (
             <button
               key={key}
+              title={label}
               onClick={() => setDisplayMode(key)}
               style={displayMode === key
-                ? { background: '#f3f4f6', color: '#111827', border: '1px solid #d1d5db', borderRadius: 7, padding: '5px 12px', fontSize: 11, fontWeight: 500, fontFamily: "'Noto Sans JP', sans-serif", cursor: 'pointer', transition: 'all 180ms' }
-                : { background: 'transparent', color: '#9ca3af', border: '1px solid transparent', borderRadius: 7, padding: '5px 12px', fontSize: 11, fontWeight: 500, fontFamily: "'Noto Sans JP', sans-serif", cursor: 'pointer', transition: 'all 180ms' }}
+                ? { background: '#f3f4f6', color: '#111827', border: '1px solid #d1d5db', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }
+                : { background: 'transparent', color: '#9ca3af', border: '1px solid transparent', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               onMouseEnter={e => { if (displayMode !== key) e.currentTarget.style.color = '#374151' }}
               onMouseLeave={e => { if (displayMode !== key) e.currentTarget.style.color = '#9ca3af' }}
             >
-              {label}
+              {ICONS[key]}
             </button>
           ))}
         </div>
@@ -1036,6 +1189,103 @@ export default function StepViewer({ file, colors, lights }) {
               キャンセル
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ViewCube */}
+      {status === 'ok' && (
+        <div style={{ position:'absolute', bottom:16, right:16, zIndex:20, display:'flex', flexDirection:'column', alignItems:'center', gap:5, pointerEvents:'none' }}>
+
+          {/* 矢印＋キューブ */}
+          <div style={{ position:'relative', width:100, height:100, pointerEvents:'auto' }}>
+
+            {/* 上矢印 */}
+            <button title="上面" onClick={() => snapToView([0,0,1],[0,1,0])}
+              style={{ position:'absolute', top:0, left:'50%', transform:'translateX(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+              <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
+                <path d="M7 1L13 9H1L7 1Z" fill="#b0bac5" stroke="none"/>
+              </svg>
+            </button>
+            {/* 下矢印 */}
+            <button title="下面" onClick={() => snapToView([0,0,-1],[0,1,0])}
+              style={{ position:'absolute', bottom:0, left:'50%', transform:'translateX(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+              <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
+                <path d="M7 9L1 1H13L7 9Z" fill="#b0bac5" stroke="none"/>
+              </svg>
+            </button>
+            {/* 左矢印 */}
+            <button title="左面" onClick={() => snapToView([1,0,0],[0,0,1])}
+              style={{ position:'absolute', top:'50%', left:0, transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+              <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
+                <path d="M1 7L9 1V13L1 7Z" fill="#b0bac5" stroke="none"/>
+              </svg>
+            </button>
+            {/* 右矢印 */}
+            <button title="右面" onClick={() => snapToView([-1,0,0],[0,0,1])}
+              style={{ position:'absolute', top:'50%', right:0, transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+              <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
+                <path d="M9 7L1 1V13L9 7Z" fill="#b0bac5" stroke="none"/>
+              </svg>
+            </button>
+
+            {/* キューブ本体 */}
+            <div style={{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', width:64, height:64, perspective:'600px' }}>
+              <div ref={viewCubeRef} style={{ width:64, height:64, transformStyle:'preserve-3d', position:'relative' }}>
+                {CUBE_FACES.map(({ key, label, cssTransform, dirArr, upArr }) => {
+                  // 面ごとに微妙に色を変えて立体感を演出
+                  const faceColor = {
+                    top:    'linear-gradient(135deg,#e8edf4 0%,#d2dae6 100%)',
+                    bottom: 'linear-gradient(135deg,#b8c3d4 0%,#a8b5c8 100%)',
+                    front:  'linear-gradient(135deg,#dde4ef 0%,#c8d3e4 100%)',
+                    back:   'linear-gradient(135deg,#c4cedd 0%,#b2becd 100%)',
+                    right:  'linear-gradient(135deg,#d0d9e8 0%,#bcc8da 100%)',
+                    left:   'linear-gradient(135deg,#cad3e2 0%,#b8c3d4 100%)',
+                  }[key]
+                  const hoverColor = 'linear-gradient(135deg,#b8d4f0 0%,#9bbde8 100%)'
+                  return (
+                    <div
+                      key={key}
+                      title={label}
+                      onClick={() => snapToView(dirArr, upArr)}
+                      style={{
+                        position:'absolute', width:64, height:64,
+                        display:'flex', alignItems:'center', justifyContent:'center',
+                        fontSize:15, fontWeight:700, letterSpacing:'0.02em',
+                        fontFamily:"'Noto Sans JP', sans-serif",
+                        background: faceColor,
+                        border:'1px solid rgba(90,110,135,0.28)',
+                        boxShadow:'inset 0 1px 0 rgba(255,255,255,0.55), inset 0 -1px 0 rgba(0,0,0,0.08)',
+                        color:'#3a4a5e',
+                        cursor:'pointer', userSelect:'none',
+                        transform: cssTransform,
+                        backfaceVisibility:'hidden',
+                        transition:'background 0.12s',
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.background = hoverColor }}
+                      onMouseLeave={e => { e.currentTarget.style.background = faceColor }}
+                    >
+                      {label}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* 等角ビューリセットボタン */}
+          <button
+            title="等角投影ビューにリセット"
+            onClick={() => snapToView([1,1,1],[0,0,1])}
+            style={{ pointerEvents:'auto', background:'rgba(255,255,255,0.92)', border:'1px solid #d1d5db', borderRadius:6, padding:'4px 8px', cursor:'pointer', boxShadow:'0 1px 3px rgba(0,0,0,0.09)', display:'flex', alignItems:'center', gap:4, color:'#6b7280' }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor='#9ca3af'; e.currentTarget.style.color='#111827' }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor='#d1d5db'; e.currentTarget.style.color='#6b7280' }}
+          >
+            <svg width="13" height="13" viewBox="0 0 20 20" fill="none">
+              <path d="M10 2a8 8 0 1 0 5.657 13.657" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+              <path d="M15 10V6h-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            <span style={{ fontSize:10, fontWeight:500, fontFamily:"'JetBrains Mono', monospace", letterSpacing:'0.05em' }}>全体表示</span>
+          </button>
         </div>
       )}
 
