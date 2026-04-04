@@ -19,6 +19,7 @@
 - **説明**: ESLintが `public/occt-import-js.js` をチェックし、Node.jsグローバル変数（`__filename`, `process`, `require` など）の未定義エラーを多数報告。これはEmscripten生成のWASMライブラリファイルで、ブラウザ環境では問題ないが、ESLintがブラウザグローバルしか認識していないため。
 - **影響**: リント時に誤ったエラーが表示され、CI/CDで問題になる可能性。ビルド失敗の間接原因の可能性。
 - **修正提案**: `eslint.config.js` の `globalIgnores` に `'public/**'` を追加。または、Node.jsグローバル（`process`, `Buffer` など）を `globals.node` として追加（ただしブラウザ環境なので推奨しない）。
+- **対応**: ✅ 修正済み（`e6fdca1`） — `globalIgnores` に `'public'` を追加。
 
 ### 2. ビルド失敗（重大度: 高）
 
@@ -32,6 +33,7 @@
   - `vite.config.js` の `build.rollupOptions.external` に `'occt-import-js'` を追加。
   - ビルドログを詳細に取得（例: `DEBUG=vite:* npm run build`）。
   - Viteバージョンを安定版（5.x）にダウングレードしてテスト。
+- **対応**: ⚠️ 対応不要 — CI環境（sandbox）のメモリ制限による打ち切りが原因と判断。Vercel 上での実ビルド・デプロイは正常に完了しており、コード上の問題なし。
 
 ### 3. HTML言語属性の不一致（重大度: 低）
 
@@ -39,6 +41,7 @@
 - **説明**: `<html lang="en">` だが、プロジェクトが日本語UIを使用（フォント: Noto Sans JP、テキスト: 日本語）。
 - **影響**: SEOやアクセシビリティの軽微な問題。
 - **修正提案**: `lang="ja"` に変更。
+- **対応**: ✅ 修正済み（`e6fdca1`） — `lang="ja"` に変更。
 
 ### 4. 潜在的なランタイムバグ（重大度: 低〜中）
 
@@ -46,11 +49,13 @@
 - **説明**: occt-import-js を動的scriptタグでロード。ブラウザ環境では問題ないが、SSRやテスト環境で失敗する可能性。
 - **影響**: 開発環境以外で動作しない。
 - **修正提案**: ESMインポートに変更するか、条件付きロードを追加。
+- **対応**: ⚠️ 対応不要 — Vite の ESM/WASM 処理を回避するための意図的な設計。本プロジェクトは CSR 専用（SSR なし）のため問題なし。
 
 - **場所**: `src/App.jsx` 行101
 - **説明**: `handleFileDrop` で `e.target.files?.[0]` と `e.dataTransfer?.files?.[0]` を使用。onDropイベントでは `e` がDragEventなので正しいが、型安全性が低い。
 - **影響**: ランタイムエラーなしだが、TypeScript使用時に型エラー。
 - **修正提案**: 型チェックを追加。
+- **対応**: ⚠️ 対応見送り — JSX プロジェクトのため現状ランタイム上の問題なし。TypeScript 移行時に対応。
 
 ## 推奨事項
 
