@@ -56,6 +56,9 @@ function App() {
   const [colors, setColors] = useState(DEFAULT_COLORS)
   const [lights, setLights] = useState(DEFAULT_LIGHTS)
 
+  // ?fileOpen=false でファイルを開くボタン・ドロップゾーンを非表示
+  const showFileOpen = new URLSearchParams(window.location.search).get('fileOpen') !== 'false'
+
   function setColor(key, val) {
     setColors(prev => ({ ...prev, [key]: val }))
   }
@@ -111,25 +114,27 @@ function App() {
             {file.name}
           </span>
         )}
-        <div style={{ marginLeft: 'auto' }}>
-          <input id="fileInput" type="file" className="hidden" accept=".step,.stp" onChange={handleFileDrop} />
-          <button
-            onClick={() => { document.getElementById('fileInput').value = ''; document.getElementById('fileInput').click() }}
-            style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 14, fontWeight: 500, color: '#374151', background: '#ffffff', border: '1px solid #d1d5db', borderRadius: 7, padding: '6px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 180ms' }}
-            onMouseEnter={e => { e.currentTarget.style.background = '#f9fafb'; e.currentTarget.style.borderColor = '#9ca3af' }}
-            onMouseLeave={e => { e.currentTarget.style.background = '#ffffff'; e.currentTarget.style.borderColor = '#d1d5db' }}
-          >
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M1 9.5V12h2.5l7-7L8 2.5l-7 7Z"/>
-              <path d="M10.5 1l2.5 2.5"/>
-            </svg>
-            ファイルを開く
-          </button>
-        </div>
+        {showFileOpen && (
+          <div style={{ marginLeft: 'auto' }}>
+            <input id="fileInput" type="file" className="hidden" accept=".step,.stp" onChange={handleFileDrop} />
+            <button
+              onClick={() => { document.getElementById('fileInput').value = ''; document.getElementById('fileInput').click() }}
+              style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 14, fontWeight: 500, color: '#374151', background: '#ffffff', border: '1px solid #d1d5db', borderRadius: 7, padding: '6px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 180ms' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#f9fafb'; e.currentTarget.style.borderColor = '#9ca3af' }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#ffffff'; e.currentTarget.style.borderColor = '#d1d5db' }}
+            >
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1 9.5V12h2.5l7-7L8 2.5l-7 7Z"/>
+                <path d="M10.5 1l2.5 2.5"/>
+              </svg>
+              ファイルを開く
+            </button>
+          </div>
+        )}
       </header>
 
-      {/* Drop zone (ファイル未選択時のみ) */}
-      {!file && (
+      {/* Drop zone (ファイル未選択時のみ・fileOpen=false の場合は非表示) */}
+      {!file && showFileOpen && (
         <div
           className="m-4 cursor-pointer transition-all"
           style={{ position: 'relative', border: '1px dashed #d1d5db', borderRadius: 10, padding: '28px 24px', textAlign: 'center', background: '#ffffff' }}

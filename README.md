@@ -131,6 +131,17 @@ STEP Viewer を iFrame として親アプリに埋め込み、postMessage でモ
 <iframe id="stepViewer" src="https://your-deployed-url/" style="width:100%;height:600px;border:none;"></iframe>
 ```
 
+### URL パラメータ
+
+| パラメータ | 値 | デフォルト | 説明 |
+| --- | --- | --- | --- |
+| `fileOpen` | `true` / `false` | `true` | `false` にすると「ファイルを開く」ボタンとドロップゾーンを非表示にする |
+
+```html
+<!-- ファイルを開くボタンを非表示（postMessage 専用モード） -->
+<iframe src="https://your-deployed-url/?fileOpen=false" style="width:100%;height:600px;border:none;"></iframe>
+```
+
 ### モデルデータの送信
 
 | フィールド | 型 | 必須 | 説明 |
