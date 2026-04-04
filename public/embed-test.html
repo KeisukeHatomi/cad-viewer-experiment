@@ -300,7 +300,7 @@
       </div>
       <iframe
         id="viewerFrame"
-        src="https://cad-viewer-experiment.vercel.app"
+        src="https://cad-viewer-experiment.vercel.app?fileOpen=false"
         allow="cross-origin-isolated"
       ></iframe>
     </div>
@@ -319,6 +319,20 @@
           <span class="api-key">allow</span>
           <span class="api-desc">cross-origin-isolated</span>
         </div>
+      </div>
+
+      <!-- URL パラメータ -->
+      <div class="card">
+        <div class="card-title">URL Parameters</div>
+        <div class="api-row">
+          <span class="api-key">fileOpen<span class="optional">optional</span></span>
+          <span class="api-type">boolean  (default: true)</span>
+          <span class="api-desc"><code>false</code> にすると「ファイルを開く」ボタンとドロップゾーンを非表示。postMessage 専用モードに。</span>
+        </div>
+        <div class="divider"></div>
+        <pre><!-- ボタンなし: postMessage 専用 -->
+&lt;iframe src="https://cad-viewer-experiment.vercel.app
+  ?fileOpen=false"&gt;&lt;/iframe&gt;</pre>
       </div>
 
       <!-- postMessage API -->
