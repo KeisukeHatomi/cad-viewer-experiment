@@ -3,47 +3,57 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>STEP Viewer 組み込みテスト</title>
+  <title>STEP Viewer — iFrame 組み込みテスト</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: system-ui, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
+      font-family: 'Noto Sans JP', system-ui, sans-serif;
+      background: #f5f5f5;
+      color: #1a1a1a;
       height: 100dvh;
       display: flex;
       flex-direction: column;
+      font-size: 14px;
     }
 
+    /* ---- Header ---- */
     header {
-      background: #1e293b;
-      border-bottom: 1px solid #334155;
-      padding: 12px 24px;
+      background: #ffffff;
+      border-bottom: 1px solid #e5e7eb;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      padding: 10px 24px;
       display: flex;
       align-items: center;
-      gap: 16px;
+      gap: 12px;
       flex-shrink: 0;
     }
 
-    header h1 {
-      font-size: 15px;
-      font-weight: 700;
-      color: #f1f5f9;
+    .header-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
     }
 
     .badge {
-      font-size: 11px;
-      background: #1d4ed8;
-      color: #fff;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      background: #f0f9ff;
+      color: #0369a1;
+      border: 1px solid #bae6fd;
       padding: 2px 8px;
       border-radius: 4px;
     }
 
+    /* ---- Toolbar ---- */
     .toolbar {
-      background: #1e293b;
-      border-bottom: 1px solid #334155;
-      padding: 10px 24px;
+      background: #ffffff;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 8px 24px;
       display: flex;
       align-items: center;
       gap: 12px;
@@ -51,44 +61,50 @@
       flex-wrap: wrap;
     }
 
-    .toolbar label {
-      font-size: 13px;
-      color: #94a3b8;
+    .toolbar-label {
+      font-size: 12px;
+      color: #6b7280;
     }
 
     .btn {
       padding: 6px 16px;
-      border-radius: 6px;
-      border: none;
+      border-radius: 7px;
+      border: 1px solid #d1d5db;
+      font-family: 'Noto Sans JP', sans-serif;
       font-size: 13px;
       font-weight: 500;
+      color: #374151;
+      background: #ffffff;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: background 0.15s, border-color 0.15s;
     }
-
-    .btn-primary {
-      background: #2563eb;
-      color: #fff;
-    }
-    .btn-primary:hover { background: #1d4ed8; }
+    .btn:hover { background: #f9fafb; border-color: #9ca3af; }
 
     .file-status {
-      font-size: 12px;
-      color: #64748b;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #9ca3af;
     }
-    .file-status.loaded { color: #4ade80; }
+    .file-status.loaded { color: #16a34a; }
 
-    .viewer-container {
+    /* ---- Main layout ---- */
+    .main {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      gap: 0;
+    }
+
+    /* ---- Viewer pane ---- */
+    .viewer-pane {
       flex: 1;
       position: relative;
+      margin: 12px 6px 12px 12px;
+      border-radius: 10px;
       overflow: hidden;
-    }
-
-    iframe {
-      width: 100%;
-      height: 100%;
-      border: none;
-      display: block;
+      border: 1px solid #e5e7eb;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+      background: #ffffff;
     }
 
     .overlay {
@@ -98,58 +114,277 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 12px;
-      background: #0f172a;
-      color: #475569;
-      font-size: 14px;
+      gap: 10px;
+      background: #f9fafb;
+      color: #9ca3af;
+      font-size: 13px;
+      pointer-events: none;
+      transition: opacity 0.2s;
     }
-    .overlay.hidden { display: none; }
+    .overlay.hidden { opacity: 0; }
 
-    .log {
-      background: #0f172a;
-      border-top: 1px solid #334155;
-      padding: 6px 24px;
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+    }
+
+    /* ---- API docs pane ---- */
+    .docs-pane {
+      width: 300px;
+      flex-shrink: 0;
+      margin: 12px 12px 12px 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow-y: auto;
+    }
+
+    .card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 14px 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+
+    .card-title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.18em;
+      color: #6b7280;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    .divider {
+      height: 1px;
+      background: #e5e7eb;
+      margin: 8px 0;
+    }
+
+    .api-row {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin-bottom: 8px;
+    }
+    .api-row:last-child { margin-bottom: 0; }
+
+    .api-key {
+      font-family: 'JetBrains Mono', monospace;
       font-size: 11px;
-      color: #64748b;
-      font-family: monospace;
+      color: #0369a1;
+    }
+
+    .api-type {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: #9ca3af;
+    }
+
+    .api-desc {
+      font-size: 11px;
+      color: #6b7280;
+      line-height: 1.5;
+    }
+
+    .required {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #dc2626;
+      margin-left: 4px;
+    }
+
+    .optional {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      color: #9ca3af;
+      margin-left: 4px;
+    }
+
+    pre {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: #374151;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 10px;
+      overflow-x: auto;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #d1d5db;
+      flex-shrink: 0;
+    }
+    .dot.ok  { background: #16a34a; }
+    .dot.err { background: #dc2626; }
+
+    .planned {
+      font-size: 11px;
+      color: #9ca3af;
+      padding: 3px 0;
+      display: flex;
+      justify-content: space-between;
+    }
+    .planned-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      background: #f3f4f6;
+      color: #9ca3af;
+      border-radius: 3px;
+      padding: 1px 5px;
+    }
+
+    /* ---- Log bar ---- */
+    .logbar {
+      background: #ffffff;
+      border-top: 1px solid #e5e7eb;
+      padding: 6px 24px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #9ca3af;
       flex-shrink: 0;
       min-height: 28px;
     }
-    .log.ok { color: #4ade80; }
-    .log.err { color: #f87171; }
+    .logbar.ok  { color: #16a34a; }
+    .logbar.err { color: #dc2626; }
   </style>
 </head>
 <body>
 
   <header>
-    <h1>BOMS Lite — STEP Viewer 組み込みテスト</h1>
+    <span class="header-title">STEP Viewer — 組み込みテスト</span>
     <span class="badge">iframe + postMessage</span>
+    <span id="iframeStatus" class="status-row" style="margin-left:auto">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">接続中...</span>
+    </span>
   </header>
 
   <div class="toolbar">
-    <label>ローカルファイルで動作確認:</label>
+    <span class="toolbar-label">ローカルファイルで動作確認:</span>
     <input id="fileInput" type="file" accept=".step,.stp" style="display:none" />
-    <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+    <button class="btn" onclick="document.getElementById('fileInput').click()">
       STEP ファイルを選択
     </button>
     <span id="fileStatus" class="file-status">未選択</span>
   </div>
 
-  <div class="viewer-container">
-    <div id="overlay" class="overlay">
-      <svg width="48" height="48" fill="none" stroke="#475569" stroke-width="1.5" viewBox="0 0 24 24">
-        <path d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25"/>
-      </svg>
-      <p>STEP ファイルを選択するとここに 3D モデルが表示されます</p>
+  <div class="main">
+
+    <!-- Viewer -->
+    <div class="viewer-pane">
+      <div id="overlay" class="overlay">
+        <svg width="40" height="40" fill="none" stroke="#d1d5db" stroke-width="1.5" viewBox="0 0 24 24">
+          <path d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25"/>
+        </svg>
+        <p>STEP ファイルを選択すると 3D モデルが表示されます</p>
+      </div>
+      <iframe
+        id="viewerFrame"
+        src="https://cad-viewer-experiment.vercel.app"
+        allow="cross-origin-isolated"
+      ></iframe>
     </div>
-    <iframe
-      id="viewerFrame"
-      src="https://cad-viewer-experiment.vercel.app"
-      allow="cross-origin-isolated"
-    ></iframe>
+
+    <!-- API Docs -->
+    <div class="docs-pane">
+
+      <!-- 接続状態 -->
+      <div class="card">
+        <div class="card-title">Connection</div>
+        <div class="api-row">
+          <span class="api-key">src</span>
+          <span class="api-desc" style="word-break:break-all">https://cad-viewer-experiment.vercel.app</span>
+        </div>
+        <div class="api-row">
+          <span class="api-key">allow</span>
+          <span class="api-desc">cross-origin-isolated</span>
+        </div>
+      </div>
+
+      <!-- postMessage API -->
+      <div class="card">
+        <div class="card-title">postMessage API</div>
+
+        <!-- loadStep -->
+        <div class="api-row">
+          <span class="api-key">type: "loadStep"<span class="required">required</span></span>
+          <span class="api-desc">STEP ファイルをロードして表示</span>
+        </div>
+        <div class="api-row">
+          <span class="api-key">buffer<span class="required">required</span></span>
+          <span class="api-type">ArrayBuffer</span>
+          <span class="api-desc">STEP ファイルのバイナリデータ</span>
+        </div>
+        <div class="api-row">
+          <span class="api-key">name<span class="optional">optional</span></span>
+          <span class="api-type">string</span>
+          <span class="api-desc">ファイル名（省略時: "model.stp"）</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <pre>const res = await fetch('/model.step')
+const buffer = await res.arrayBuffer()
+
+frame.contentWindow.postMessage(
+  {
+    type:   'loadStep',
+    buffer: buffer,
+    name:   'model.step',
+  },
+  'https://cad-viewer-experiment.vercel.app'
+)</pre>
+      </div>
+
+      <!-- 予定 API -->
+      <div class="card">
+        <div class="card-title">Planned API</div>
+        <div class="planned">
+          <span>setDisplayMode</span>
+          <span class="planned-badge">予定</span>
+        </div>
+        <div class="planned">
+          <span>setColors</span>
+          <span class="planned-badge">予定</span>
+        </div>
+        <div class="planned">
+          <span>setCamera</span>
+          <span class="planned-badge">予定</span>
+        </div>
+        <div class="planned">
+          <span>resetCamera</span>
+          <span class="planned-badge">予定</span>
+        </div>
+        <div class="planned">
+          <span>measure</span>
+          <span class="planned-badge">予定</span>
+        </div>
+      </div>
+
+    </div>
   </div>
 
-  <div id="log" class="log">待機中...</div>
+  <div id="log" class="logbar">待機中...</div>
 
   <script>
     const fileInput  = document.getElementById('fileInput')
@@ -157,21 +392,25 @@
     const frame      = document.getElementById('viewerFrame')
     const overlay    = document.getElementById('overlay')
     const log        = document.getElementById('log')
+    const statusDot  = document.getElementById('statusDot')
+    const statusText = document.getElementById('statusText')
+
+    const VIEWER_ORIGIN = 'https://cad-viewer-experiment.vercel.app'
 
     let iframeReady = false
 
-    // iframe のロード完了を検知
     frame.addEventListener('load', () => {
       iframeReady = true
+      statusDot.classList.add('ok')
+      statusText.textContent = '接続済み'
       setLog('ビューア読み込み完了。ファイルを選択してください。', '')
     })
 
-    // ファイル選択
     fileInput.addEventListener('change', async (e) => {
       const file = e.target.files?.[0]
       if (!file) return
 
-      fileStatus.textContent = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`
+      fileStatus.textContent = `${file.name}  (${(file.size / 1024).toFixed(1)} KB)`
       fileStatus.className = 'file-status loaded'
       setLog(`"${file.name}" を読み込み中...`, '')
 
@@ -183,14 +422,13 @@
           return
         }
 
-        // postMessage で送信（BOMS Lite から Drive ファイルを送る場合も同じ形式）
         frame.contentWindow.postMessage(
           { type: 'loadStep', buffer, name: file.name },
-          'https://cad-viewer-experiment.vercel.app'
+          VIEWER_ORIGIN
         )
 
         overlay.classList.add('hidden')
-        setLog(`送信完了: "${file.name}" → iframe`, 'ok')
+        setLog(`送信完了: "${file.name}"  →  iframe (postMessage)`, 'ok')
       } catch (err) {
         setLog(`エラー: ${err.message}`, 'err')
       }
@@ -198,7 +436,7 @@
 
     function setLog(msg, type) {
       log.textContent = msg
-      log.className = 'log' + (type ? ` ${type}` : '')
+      log.className = 'logbar' + (type ? ` ${type}` : '')
     }
   </script>
 
