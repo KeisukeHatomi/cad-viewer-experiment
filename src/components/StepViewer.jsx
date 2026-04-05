@@ -68,7 +68,7 @@ const ICONS = {
 
 // ViewCube 面定義 (Z-up CAD 座標系)
 // cssTransform: CSS 3D での面の向き  dirArr: スナップ時のカメラ方向  upArr: スナップ時の up ベクトル
-const CUBE_H = 30  // 60px キューブの半サイズ
+const CUBE_H = 18  // 36px キューブの半サイズ
 // cssTransform の CSS ローカル法線 → Three.js ワールド方向 の対応:
 //   translateZ        → CSS +Z → Three.js +Z (上)
 //   rotateY(180)translateZ → CSS -Z → Three.js -Z (下)
@@ -318,7 +318,7 @@ export default function StepViewer({ file, colors, lights }) {
     const labelRenderer = new CSS2DRenderer()
     labelRenderer.setSize(W, H)
     Object.assign(labelRenderer.domElement.style, {
-      position: 'absolute', top: '0', left: '0', pointerEvents: 'none',
+      position: 'absolute', top: '0', left: '0', pointerEvents: 'none', zIndex: 10,
     })
     container.appendChild(labelRenderer.domElement)
     labelRendererRef.current = labelRenderer
@@ -558,14 +558,20 @@ export default function StepViewer({ file, colors, lights }) {
     // 等角投影カメラで dx_pixel → world = dx_pixel * (right-left) / clientWidth / zoom
     let panLastX = 0, panLastY = 0
 
+    let isPanning = false
+
     function onPanDown(e) {
       if (e.button !== 2) return
+      isPanning = true
       panLastX = e.clientX
       panLastY = e.clientY
+      // パン中はラベルレイヤーのポインターイベントを無効化（ラベルがイベントを奪うのを防止）
+      labelRenderer.domElement.style.pointerEvents = 'none'
     }
 
     function onPanMove(e) {
-      if (!(e.buttons & 2)) return
+      if (!isPanning) return
+      if (!(e.buttons & 2)) { onPanUp(); return }
       const dx = e.clientX - panLastX
       const dy = e.clientY - panLastY
       panLastX = e.clientX
@@ -592,10 +598,18 @@ export default function StepViewer({ file, colors, lights }) {
       controls.target.add(panVec)
     }
 
+    function onPanUp() {
+      if (!isPanning) return
+      isPanning = false
+      // ラベルレイヤーのポインターイベントを復元（レイヤー自体は none のまま、個別ラベルが auto）
+      labelRenderer.domElement.style.pointerEvents = 'none'
+    }
+
     function onContextMenu(e) { e.preventDefault() }
     renderer.domElement.addEventListener('contextmenu', onContextMenu)
     renderer.domElement.addEventListener('mousedown', onPanDown)
     document.addEventListener('mousemove', onPanMove)
+    document.addEventListener('mouseup', onPanUp)
 
     // --- ズーム（キャプチャフェーズ: マウス位置を中心に拡縮）---
     function onWheelZoom(e) {
@@ -1346,6 +1360,7 @@ export default function StepViewer({ file, colors, lights }) {
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('mousedown', onPanDown)
       document.removeEventListener('mousemove', onPanMove)
+      document.removeEventListener('mouseup', onPanUp)
       renderer.domElement.removeEventListener('mousedown', onMouseDown)
       renderer.domElement.removeEventListener('mousedown', onRotateDown)
       renderer.domElement.removeEventListener('mousemove', onHoverMove)
@@ -1702,7 +1717,11 @@ export default function StepViewer({ file, colors, lights }) {
         div.addEventListener('mouseleave', () => { div.style.boxShadow = 'none' })
         // ラベル直接の mousedown でドラッグ開始（CSS2DRenderer の pointerEvents:none を回避）
         div.addEventListener('mousedown', (e) => {
-          if (e.button !== 0) return
+          if (e.button !== 0) {
+            // 右クリック等はパンのために下のcanvasへイベントを転送
+            renderer.domElement.dispatchEvent(new MouseEvent('mousedown', e))
+            return
+          }
           e.stopPropagation()
           const labelObj = holeAnnotationsRef.current.get(annotId)?.labelObj
           if (labelObj) {
@@ -1942,7 +1961,11 @@ export default function StepViewer({ file, colors, lights }) {
     labelObj.position.copy(mid)
     // ラベル直接 mousedown → ラベルのみ移動ドラッグ開始
     div.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return
+      if (e.button !== 0) {
+        // 右クリック等はパンのために下のcanvasへイベントを転送
+        renderer.domElement.dispatchEvent(new MouseEvent('mousedown', e))
+        return
+      }
       e.stopPropagation()
       dragDimRef.current = { type: 'dimLabel', id, labelObj, lastX: e.clientX, lastY: e.clientY }
       selectedDimIdRef.current = id
@@ -2177,7 +2200,12 @@ export default function StepViewer({ file, colors, lights }) {
     labelObj.position.copy(labelPos)
     // ラベル直接 mousedown でドラッグ開始（編集中はドラッグ無効）
     div.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || div._editing) return
+      if (e.button !== 0) {
+        // 右クリック等はパンのために下のcanvasへイベントを転送
+        renderer.domElement.dispatchEvent(new MouseEvent('mousedown', e))
+        return
+      }
+      if (div._editing) return
       e.stopPropagation()
       dragDimRef.current = { type: 'comment', id: commentId, labelObj, lastX: e.clientX, lastY: e.clientY }
     })
@@ -2270,6 +2298,32 @@ export default function StepViewer({ file, colors, lights }) {
     sync()
     return () => cancelAnimationFrame(rafId)
   }, [])
+
+  // カメラの現在方向から相対的に90°回転
+  // hStep: 水平回転(+1=画面右方向に回転, -1=左), vStep: 垂直回転(+1=上, -1=下)
+  function rotateViewRelative(hStep, vStep) {
+    const cam = cameraRef.current
+    const ctrl = controlsRef.current
+    if (!cam || !ctrl) return
+    const dir = cam.position.clone().sub(ctrl.target).normalize()
+    const up = cam.up.clone().normalize()
+    const right = new THREE.Vector3().crossVectors(up, dir).normalize()
+    let newDir = dir.clone()
+    let newUp = up.clone()
+    if (hStep !== 0) {
+      newDir.applyAxisAngle(up, -hStep * Math.PI / 2)
+    }
+    if (vStep !== 0) {
+      newDir.applyAxisAngle(right, vStep * Math.PI / 2)
+      newUp.applyAxisAngle(right, vStep * Math.PI / 2)
+    }
+    // 浮動小数点誤差を除去（90°回転なので軸整列）
+    const round = v => { v.x = Math.round(v.x); v.y = Math.round(v.y); v.z = Math.round(v.z); return v }
+    round(newDir)
+    round(newUp)
+    if (newDir.lengthSq() === 0 || newUp.lengthSq() === 0) return
+    snapToView(newDir.toArray(), newUp.toArray())
+  }
 
   // 標準ビューへスナップ（350ms easeInOutQuad）＋モデルフィット
   function snapToView(dirArr, upArr) {
@@ -2467,7 +2521,7 @@ export default function StepViewer({ file, colors, lights }) {
 
       {/* 穴・円筒面情報パネル */}
       {showHolePanel && holeInfo && (
-        <div className="absolute top-14 right-4 z-30" style={{ width: 260, background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '12px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: 360, overflowY: 'auto' }}>
+        <div className="absolute top-14 right-4" style={{ zIndex: 50, width: 260, background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '12px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: 360, overflowY: 'auto' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: '0.15em', color: '#6b7280', textTransform: 'uppercase' }}>穴・円筒面情報</span>
             <button onClick={() => setShowHolePanel(false)} style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>✕</button>
@@ -2591,40 +2645,40 @@ export default function StepViewer({ file, colors, lights }) {
         <div style={{ position:'absolute', bottom:16, right:16, zIndex:20, display:'flex', flexDirection:'column', alignItems:'center', gap:5, pointerEvents:'none' }}>
 
           {/* 矢印＋キューブ */}
-          <div style={{ position:'relative', width:100, height:100, pointerEvents:'auto' }}>
+          <div style={{ position:'relative', width:80, height:80, pointerEvents:'auto' }}>
 
             {/* 上矢印 */}
-            <button title="上面" onClick={() => snapToView([0,0,1],[0,1,0])}
-              style={{ position:'absolute', top:0, left:'50%', transform:'translateX(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+            <button title="上へ回転" onClick={() => rotateViewRelative(0, 1)}
+              style={{ position:'absolute', top:0, left:'50%', transform:'translateX(-50%)', background:'none', border:'none', cursor:'pointer', padding:2, lineHeight:1 }}>
               <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
                 <path d="M7 1L13 9H1L7 1Z" fill="#b0bac5" stroke="none"/>
               </svg>
             </button>
             {/* 下矢印 */}
-            <button title="下面" onClick={() => snapToView([0,0,-1],[0,1,0])}
-              style={{ position:'absolute', bottom:0, left:'50%', transform:'translateX(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+            <button title="下へ回転" onClick={() => rotateViewRelative(0, -1)}
+              style={{ position:'absolute', bottom:0, left:'50%', transform:'translateX(-50%)', background:'none', border:'none', cursor:'pointer', padding:2, lineHeight:1 }}>
               <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
                 <path d="M7 9L1 1H13L7 9Z" fill="#b0bac5" stroke="none"/>
               </svg>
             </button>
             {/* 左矢印 */}
-            <button title="左面" onClick={() => snapToView([1,0,0],[0,0,1])}
-              style={{ position:'absolute', top:'50%', left:0, transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+            <button title="左へ回転" onClick={() => rotateViewRelative(-1, 0)}
+              style={{ position:'absolute', top:'50%', left:0, transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', padding:2, lineHeight:1 }}>
               <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
                 <path d="M1 7L9 1V13L1 7Z" fill="#b0bac5" stroke="none"/>
               </svg>
             </button>
             {/* 右矢印 */}
-            <button title="右面" onClick={() => snapToView([-1,0,0],[0,0,1])}
-              style={{ position:'absolute', top:'50%', right:0, transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', padding:0, lineHeight:1 }}>
+            <button title="右へ回転" onClick={() => rotateViewRelative(1, 0)}
+              style={{ position:'absolute', top:'50%', right:0, transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', padding:2, lineHeight:1 }}>
               <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
                 <path d="M9 7L1 1V13L9 7Z" fill="#b0bac5" stroke="none"/>
               </svg>
             </button>
 
             {/* キューブ本体 */}
-            <div style={{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', width:64, height:64, perspective:'600px' }}>
-              <div ref={viewCubeRef} style={{ width:64, height:64, transformStyle:'preserve-3d', position:'relative' }}>
+            <div style={{ position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', width:38, height:38, perspective:'400px' }}>
+              <div ref={viewCubeRef} style={{ width:38, height:38, transformStyle:'preserve-3d', position:'relative' }}>
                 {CUBE_FACES.map(({ key, label, cssTransform, dirArr, upArr }) => {
                   // 面ごとに微妙に色を変えて立体感を演出
                   const faceColor = {
@@ -2642,9 +2696,9 @@ export default function StepViewer({ file, colors, lights }) {
                       title={label}
                       onClick={() => snapToView(dirArr, upArr)}
                       style={{
-                        position:'absolute', width:64, height:64,
+                        position:'absolute', width:38, height:38,
                         display:'flex', alignItems:'center', justifyContent:'center',
-                        fontSize:15, fontWeight:700, letterSpacing:'0.02em',
+                        fontSize:9, fontWeight:700, letterSpacing:'0.02em',
                         fontFamily:"'Noto Sans JP', sans-serif",
                         background: faceColor,
                         border:'1px solid rgba(90,110,135,0.28)',
