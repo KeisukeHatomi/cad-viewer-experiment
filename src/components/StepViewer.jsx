@@ -58,6 +58,12 @@ const ICONS = {
       <line x1="4"  y1="12" x2="16" y2="12" stroke="currentColor" strokeWidth="1"/>
     </svg>
   ),
+  holeInfo: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
+      <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.5"/>
+      <circle cx="10" cy="10" r="3" stroke="currentColor" strokeWidth="1.5"/>
+    </svg>
+  ),
 }
 
 // ViewCube 面定義 (Z-up CAD 座標系)
@@ -113,6 +119,19 @@ export default function StepViewer({ file, colors, lights }) {
   // プリアロケーション済みシルエット用 BufferGeometry
   const silGeoRef = useRef(null)
 
+  // 配置済み寸法
+  const dimObjectsRef    = useRef(new Map()) // id → { group, labelObj, p1, p2, leader1, leader2 }
+  const selectedDimIdRef = useRef(null)
+  const dragDimRef       = useRef(null) // { id, labelObj, lastX, lastY } | null
+
+  // ホバーハイライト & ゴムバンド（寸法モード）
+  const hoverHighlightRef = useRef(null) // 面/エッジのハイライトオブジェクト
+  const rubberBandRef     = useRef(null) // 1点目選択後のゴムバンド線
+  const sel1HighlightRef  = useRef(null) // 1点目選択中のハイライト（確定まで維持）
+
+  // B-rep面情報: mesh → brep_faces 配列のマップ（面ハイライト用）
+  const brepFacesMapRef = useRef(new Map()) // THREE.Mesh → [{ first, last }, ...]
+
   // モデル面マテリアル（ロード後に色変更できるようref管理）
   const solidMatRef = useRef(null)
 
@@ -145,14 +164,26 @@ export default function StepViewer({ file, colors, lights }) {
     if (fillLightRef.current) fillLightRef.current.intensity = lights.fill
   }, [lights])
 
-  // 寸法測定
-  const [pendingPoint, setPendingPoint] = useState(null)
-  const pendingPointRef = useRef(null)
-  const pendingMarkerRef = useRef(null)
+  // 寸法測定 — 1点目選択状態
+  const [measureSel1, setMeasureSel1] = useState(null)
+  // null | { type: 'face'|'edge', point: THREE.Vector3, normal: THREE.Vector3|null }
+  const measureSel1Ref = useRef(null)
+
+  // 配置済み寸法 (React 側: 再レンダリングのトリガー用)
+  const [_dimensions, setDimensions] = useState([])
+  const [selectedDimId, setSelectedDimId] = useState(null)
 
   // コメント入力ポップアップ
   const [commentInput, setCommentInput] = useState(null) // { clientX, clientY, worldPos }
   const [commentText, setCommentText] = useState('')
+
+  // 穴・円筒面の解析結果
+  const [holeInfo, setHoleInfo] = useState(null) // [{ diameter, count, isHole, instances }] | null
+  const [showHolePanel, setShowHolePanel] = useState(false)
+  const holeAnnotationsRef = useRef(new Map()) // annotId → { labelObj, leader, arrow, overlay, anchor }
+
+  // コメントオブジェクト
+  const commentObjectsRef = useRef(new Map()) // id → { labelObj, leader, arrow, anchor }
 
   // ドラッグ判定
   const mouseDownRef = useRef(null)
@@ -162,14 +193,28 @@ export default function StepViewer({ file, colors, lights }) {
   useEffect(() => {
     modeRef.current = mode
     if (mode !== 'measure') {
-      if (pendingMarkerRef.current && sceneRef.current) {
-        sceneRef.current.remove(pendingMarkerRef.current)
-        pendingMarkerRef.current.geometry.dispose()
-        pendingMarkerRef.current.material.dispose()
-        pendingMarkerRef.current = null
+      // ゴムバンド・ホバーハイライト・sel1ハイライトのクリア
+      if (rubberBandRef.current && sceneRef.current) {
+        sceneRef.current.remove(rubberBandRef.current)
+        rubberBandRef.current.geometry.dispose()
+        rubberBandRef.current.material.dispose()
+        rubberBandRef.current = null
       }
-      pendingPointRef.current = null
-      setPendingPoint(null)
+      const disposeGroup = (grp) => {
+        if (!grp || !sceneRef.current) return
+        sceneRef.current.remove(grp)
+        grp.traverse(child => {
+          if (child.geometry && !child._sharedGeo) child.geometry.dispose()
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+            else child.material.dispose()
+          }
+        })
+      }
+      disposeGroup(hoverHighlightRef.current); hoverHighlightRef.current = null
+      disposeGroup(sel1HighlightRef.current);  sel1HighlightRef.current = null
+      measureSel1Ref.current = null
+      setMeasureSel1(null)
     }
     if (mode !== 'comment') {
       setCommentInput(null)
@@ -247,8 +292,14 @@ export default function StepViewer({ file, colors, lights }) {
     silhouetteGroupRef.current = null
     silEdgeDataRef.current     = null
     silGeoRef.current          = null
-    pendingPointRef.current = null
-    setPendingPoint(null)
+    measureSel1Ref.current = null
+    setMeasureSel1(null)
+    setDimensions([])
+    dimObjectsRef.current.clear()
+    setSelectedDimId(null)
+    selectedDimIdRef.current = null
+    hoverHighlightRef.current = null
+    rubberBandRef.current = null
     setCommentInput(null)
 
     const container = mountRef.current
@@ -439,7 +490,7 @@ export default function StepViewer({ file, colors, lights }) {
 
     function onRotateDown(e) {
       if (e.button !== 0) return
-      if (modeRef.current !== 'navigate') return
+      if (dragDimRef.current) return  // 寸法ラベルドラッグが優先
       const rect = renderer.domElement.getBoundingClientRect()
       const mouse = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -459,7 +510,7 @@ export default function StepViewer({ file, colors, lights }) {
 
     function onRotateMove(e) {
       if (!(e.buttons & 1) || !rotatePivot) return
-      if (modeRef.current !== 'navigate') return
+      if (dragDimRef.current) return  // 寸法ラベルドラッグ中は回転しない
       const dx = e.clientX - rotateLastX
       const dy = e.clientY - rotateLastY
       rotateLastX = e.clientX
@@ -573,14 +624,180 @@ export default function StepViewer({ file, colors, lights }) {
       controls.target.add(delta)
     }
 
+    // --- ドラッグ（寸法矢印 / 寸法ラベル / 穴アノテーション / コメント 共通入口）---
+    function onDimDragMove(e) {
+      if (!dragDimRef.current) return
+
+      // 穴アノテーション / コメント の場合は汎用リーダー線ドラッグ
+      if (dragDimRef.current.type === 'holeAnnot' || dragDimRef.current.type === 'comment') {
+        onLeaderLabelDrag(e)
+        return
+      }
+
+      const { type, id, labelObj, lastX, lastY } = dragDimRef.current
+      const dx = e.clientX - lastX
+      const dy = e.clientY - lastY
+      dragDimRef.current.lastX = e.clientX
+      dragDimRef.current.lastY = e.clientY
+      if (dx === 0 && dy === 0) return
+      const H = container.clientHeight
+      const worldPerPixel = (camera.top - camera.bottom) / (camera.zoom * H)
+      camera.updateMatrixWorld()
+      const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0)
+      const camUp    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1)
+
+      // マウス移動のワールドベクトル
+      const moveVec = new THREE.Vector3()
+        .addScaledVector(camRight, dx * worldPerPixel)
+        .addScaledVector(camUp, -dy * worldPerPixel)
+
+      const dimObj = dimObjectsRef.current.get(id)
+      if (!dimObj) return
+
+      const { perpCandidates, pA_proj, pB_proj } = dimObj
+
+      if (type === 'dimArrow') {
+        // --- 矢印ドラッグ: ドラッグ方向に近い軸をロックして移動 ---
+        // ドラッグ開始後の初回移動で軸をロック
+        if (!dragDimRef.current.lockedPerp) {
+          const d0 = Math.abs(moveVec.dot(perpCandidates[0]))
+          const d1 = Math.abs(moveVec.dot(perpCandidates[1]))
+          dragDimRef.current.lockedPerp = d0 >= d1 ? perpCandidates[0] : perpCandidates[1]
+        }
+        const activePerp = dragDimRef.current.lockedPerp
+        const perpAmount = moveVec.dot(activePerp)
+        const perpMove = activePerp.clone().multiplyScalar(perpAmount)
+
+        dimObj.group.position.add(perpMove)
+        dimObj.offset.add(perpMove)
+        dimObj.p1.copy(pA_proj).add(dimObj.offset)
+        dimObj.p2.copy(pB_proj).add(dimObj.offset)
+
+        // ラベルも perpDir 方向のみ移動（寸法線と一緒に動く）
+        labelObj.position.add(perpMove)
+
+        // 引き出し線を更新
+        if (dimObj.ext1) {
+          const a = dimObj.ext1.geometry.attributes.position.array
+          a[0] = pA_proj.x; a[1] = pA_proj.y; a[2] = pA_proj.z
+          a[3] = dimObj.p1.x; a[4] = dimObj.p1.y; a[5] = dimObj.p1.z
+          dimObj.ext1.geometry.attributes.position.needsUpdate = true
+        }
+        if (dimObj.ext2) {
+          const a = dimObj.ext2.geometry.attributes.position.array
+          a[0] = pB_proj.x; a[1] = pB_proj.y; a[2] = pB_proj.z
+          a[3] = dimObj.p2.x; a[4] = dimObj.p2.y; a[5] = dimObj.p2.z
+          dimObj.ext2.geometry.attributes.position.needsUpdate = true
+        }
+      } else {
+        // --- ラベルドラッグ (dimLabel): ラベルのみ自由移動 ---
+        labelObj.position.add(moveVec)
+      }
+
+      // リーダー線: ラベルが寸法線中点から離れたら表示
+      const dimMid = dimObj.p1.clone().add(dimObj.p2).multiplyScalar(0.5)
+      const labelPos = labelObj.position
+      const dist = labelPos.distanceTo(dimMid)
+      const threshold = modelSizeRef.current * 0.01
+
+      if (dimObj.leader) {
+        if (dist > threshold) {
+          dimObj.leader.visible = true
+          const a = dimObj.leader.geometry.attributes.position.array
+          a[0] = dimMid.x; a[1] = dimMid.y; a[2] = dimMid.z
+          a[3] = labelPos.x; a[4] = labelPos.y; a[5] = labelPos.z
+          dimObj.leader.geometry.attributes.position.needsUpdate = true
+        } else {
+          dimObj.leader.visible = false
+        }
+      }
+    }
+    // --- 穴アノテーションドラッグ ---
+    // 穴アノテーション / コメント 共通のリーダー線ドラッグ
+    function onLeaderLabelDrag(e) {
+      const { type, id, labelObj, lastX, lastY } = dragDimRef.current
+      const dx = e.clientX - lastX
+      const dy = e.clientY - lastY
+      dragDimRef.current.lastX = e.clientX
+      dragDimRef.current.lastY = e.clientY
+      if (dx === 0 && dy === 0) return
+
+      const H = container.clientHeight
+      const worldPerPixel = (camera.top - camera.bottom) / (camera.zoom * H)
+      camera.updateMatrixWorld()
+      const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0)
+      const camUp    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1)
+      const moveVec = new THREE.Vector3()
+        .addScaledVector(camRight, dx * worldPerPixel)
+        .addScaledVector(camUp, -dy * worldPerPixel)
+
+      // ラベルを自由移動
+      labelObj.position.add(moveVec)
+
+      // 引き出し線 + 矢印を更新
+      const store = type === 'holeAnnot' ? holeAnnotationsRef : commentObjectsRef
+      const obj = store.current.get(id)
+      if (obj) {
+        const a = obj.leader.geometry.attributes.position.array
+        a[3] = labelObj.position.x; a[4] = labelObj.position.y; a[5] = labelObj.position.z
+        obj.leader.geometry.attributes.position.needsUpdate = true
+        updateLineArrow(obj.arrow, obj.anchor, labelObj.position, modelSizeRef.current)
+      }
+    }
+
+    function onDimDragEnd() {
+      dragDimRef.current = null
+    }
+
     // --- クリック vs ドラッグ判定 ---
     function onMouseDown(e) {
       mouseDownRef.current = { x: e.clientX, y: e.clientY }
+
+      // 左ボタン + 寸法モード: 矢印コーンをレイキャストして寸法ドラッグ開始
+      if (e.button === 0 && !dragDimRef.current) {
+        const rect = renderer.domElement.getBoundingClientRect()
+        const mouse = new THREE.Vector2(
+          ((e.clientX - rect.left) / rect.width) * 2 - 1,
+          -((e.clientY - rect.top) / rect.height) * 2 + 1,
+        )
+        const rc = new THREE.Raycaster()
+        rc.setFromCamera(mouse, camera)
+        // 全寸法の矢印コーン + ヒットエリアを集めてレイキャスト
+        const allCones = []
+        for (const [, obj] of dimObjectsRef.current) {
+          if (obj.cones) allCones.push(...obj.cones)
+        }
+        if (allCones.length) {
+          const hits = rc.intersectObjects(allCones, false)
+          if (hits.length) {
+            const dimId = hits[0].object._dimId
+            const dimObj = dimObjectsRef.current.get(dimId)
+            if (dimObj) {
+              e.stopPropagation()
+              dragDimRef.current = {
+                type: 'dimArrow', id: dimId, labelObj: dimObj.labelObj,
+                lastX: e.clientX, lastY: e.clientY,
+              }
+              selectedDimIdRef.current = dimId
+              setSelectedDimId(dimId)
+              return
+            }
+          }
+        }
+      }
+
+      // 寸法の選択解除（canvas クリック時）
+      if (e.button === 0 && modeRef.current === 'measure' && !dragDimRef.current && selectedDimIdRef.current) {
+        selectedDimIdRef.current = null
+        setSelectedDimId(null)
+      }
     }
 
     function onMouseUp(e) {
       const down = mouseDownRef.current
       mouseDownRef.current = null
+      // ラベルドラッグ終了
+      if (dragDimRef.current) { dragDimRef.current = null; return }
       if (!down) return
       if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return
       if (modeRef.current === 'navigate') return
@@ -590,25 +807,243 @@ export default function StepViewer({ file, colors, lights }) {
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       )
-      const rc = new THREE.Raycaster()
-      rc.setFromCamera(mouse, camera)
-      const hits = rc.intersectObjects(meshesRef.current, false)
-      if (!hits.length) return
-
-      const pt = hits[0].point.clone()
 
       if (modeRef.current === 'measure') {
-        handleMeasureClick(pt, scene)
+        handleMeasureClick(mouse, scene, camera, container)
       } else if (modeRef.current === 'comment') {
-        setCommentInput({ clientX: e.clientX, clientY: e.clientY, worldPos: pt })
+        const rc = new THREE.Raycaster()
+        rc.setFromCamera(mouse, camera)
+        const hits = rc.intersectObjects(meshesRef.current, false)
+        if (!hits.length) return
+        setCommentInput({ clientX: e.clientX, clientY: e.clientY, worldPos: hits[0].point.clone() })
         setCommentText('')
       }
     }
 
+    // --- ホバーハイライト & ゴムバンド（寸法モード）---
+    function clearHoverHighlight() {
+      if (!hoverHighlightRef.current) return
+      scene.remove(hoverHighlightRef.current)
+      // グループ内の子を再帰的に dispose（共有 geometry はスキップ）
+      hoverHighlightRef.current.traverse(child => {
+        if (child.geometry && !child._sharedGeo) child.geometry.dispose()
+        if (child.material) {
+          if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+          else child.material.dispose()
+        }
+      })
+      hoverHighlightRef.current = null
+    }
+
+    function updateHoverHighlight(hit) {
+      clearHoverHighlight()
+      if (!hit) return
+
+      const grp = new THREE.Group()
+
+      // スクリーン座標ベースのサイズ（ズーム不変）
+      const H = container.clientHeight
+      const worldPx = (camera.top - camera.bottom) / (camera.zoom * H)
+      // Three.js では Group の renderOrder は子に伝播しないため、各 Line に直接設定する
+      const mkLine = (pts, col = 0x2299ff) => {
+        const ln = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          new THREE.LineBasicMaterial({ color: col, depthTest: false, depthWrite: false }),
+        )
+        ln.renderOrder = 100
+        return ln
+      }
+
+      if (hit.type === 'face' && hit.normal && hit.rawHit) {
+        // B-rep 面ハイライト: faceIndex からどの brep_face に属するか特定し、その三角形だけをオーバーレイ
+        const rawHit = hit.rawHit
+        const meshObj = rawHit.object
+        const brepFaces = brepFacesMapRef.current.get(meshObj)
+        const hitTriIdx = rawHit.faceIndex  // ヒットした三角形番号
+
+        if (brepFaces && hitTriIdx != null) {
+          // hitTriIdx がどの brep_face に含まれるか検索（first/last は三角形番号）
+          const bf = brepFaces.find(f => hitTriIdx >= f.first && hitTriIdx <= f.last)
+          if (bf) {
+            const srcGeo = meshObj.geometry
+            const srcIndex = srcGeo.index
+            const srcPos = srcGeo.attributes.position
+            const srcNormal = srcGeo.attributes.normal
+
+            // brep_face の三角形範囲からサブジオメトリを作成
+            const triCount = bf.last - bf.first + 1
+            const vertCount = triCount * 3
+            const positions = new Float32Array(vertCount * 3)
+            const normals = srcNormal ? new Float32Array(vertCount * 3) : null
+
+            for (let t = 0; t < triCount; t++) {
+              for (let v = 0; v < 3; v++) {
+                const srcVert = srcIndex
+                  ? srcIndex.array[(bf.first + t) * 3 + v]
+                  : (bf.first + t) * 3 + v
+                const dstIdx = t * 3 + v
+                positions[dstIdx * 3]     = srcPos.array[srcVert * 3]
+                positions[dstIdx * 3 + 1] = srcPos.array[srcVert * 3 + 1]
+                positions[dstIdx * 3 + 2] = srcPos.array[srcVert * 3 + 2]
+                if (normals) {
+                  normals[dstIdx * 3]     = srcNormal.array[srcVert * 3]
+                  normals[dstIdx * 3 + 1] = srcNormal.array[srcVert * 3 + 1]
+                  normals[dstIdx * 3 + 2] = srcNormal.array[srcVert * 3 + 2]
+                }
+              }
+            }
+
+            const faceGeo = new THREE.BufferGeometry()
+            faceGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+            if (normals) faceGeo.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+
+            const hlMesh = new THREE.Mesh(faceGeo, new THREE.MeshBasicMaterial({
+              color: 0x44aaff, transparent: true, opacity: 0.35,
+              side: THREE.DoubleSide, depthTest: true,
+              polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+            }))
+            hlMesh.matrix.copy(meshObj.matrixWorld)
+            hlMesh.matrixAutoUpdate = false
+            hlMesh.renderOrder = 50
+            grp.add(hlMesh)
+          }
+        }
+
+        // 面法線マーカー（円 + 矢印）
+        const n = hit.normal.clone().normalize()
+        const offset = n.clone().multiplyScalar(worldPx * 2)
+        const origin = hit.point.clone().add(offset)
+        const r = worldPx * 10
+        const tmp = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)
+        const axis1 = new THREE.Vector3().crossVectors(tmp, n).normalize()
+        const axis2 = new THREE.Vector3().crossVectors(n, axis1).normalize()
+
+        const circPts = []
+        for (let i = 0; i <= 24; i++) {
+          const a = (i / 24) * Math.PI * 2
+          circPts.push(origin.clone().addScaledVector(axis1, Math.cos(a) * r).addScaledVector(axis2, Math.sin(a) * r))
+        }
+        grp.add(mkLine(circPts))
+
+        const arrowTip = origin.clone().addScaledVector(n, r * 1.2)
+        grp.add(mkLine([origin.clone(), arrowTip]))
+        const aw = r * 0.35
+        const ah = r * 0.45
+        const arBase = arrowTip.clone().addScaledVector(n, -ah)
+        grp.add(mkLine([
+          arBase.clone().addScaledVector(axis1, aw), arrowTip, arBase.clone().addScaledVector(axis1, -aw),
+        ]))
+
+      } else if (hit.type === 'edge' && hit.rawHit) {
+        const rawHit = hit.rawHit
+        const posArr = rawHit.object.geometry.attributes.position.array
+        const idx = rawHit.index ?? 0
+        const ep0 = new THREE.Vector3(posArr[idx * 3], posArr[idx * 3 + 1], posArr[idx * 3 + 2])
+          .applyMatrix4(rawHit.object.matrixWorld)
+        const ep1 = new THREE.Vector3(posArr[(idx + 1) * 3], posArr[(idx + 1) * 3 + 1], posArr[(idx + 1) * 3 + 2])
+          .applyMatrix4(rawHit.object.matrixWorld)
+
+        // ハイライトエッジライン
+        grp.add(mkLine([ep0, ep1]))
+
+        // ヒット点に X クロスヘア（カメラ平面向き、約 8px）
+        const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0)
+        const camUp    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1)
+        const s = worldPx * 8
+        const c = hit.point
+        grp.add(mkLine([
+          c.clone().addScaledVector(camRight,  s).addScaledVector(camUp,  s),
+          c.clone().addScaledVector(camRight, -s).addScaledVector(camUp, -s),
+        ]))
+        grp.add(mkLine([
+          c.clone().addScaledVector(camRight,  s).addScaledVector(camUp, -s),
+          c.clone().addScaledVector(camRight, -s).addScaledVector(camUp,  s),
+        ]))
+
+      } else if (hit.type === 'vertex') {
+        // 頂点 — カメラ平面向きのダイヤモンド形（オレンジ、約 8px）
+        const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0)
+        const camUp    = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1)
+        const s = worldPx * 8
+        const c = hit.point
+        const dPts = [
+          c.clone().addScaledVector(camUp,     s),
+          c.clone().addScaledVector(camRight,  s),
+          c.clone().addScaledVector(camUp,    -s),
+          c.clone().addScaledVector(camRight, -s),
+          c.clone().addScaledVector(camUp,     s),
+        ]
+        grp.add(mkLine(dPts, 0xff8800))
+        grp.add(mkLine([
+          c.clone().addScaledVector(camRight,  s * 0.5),
+          c.clone().addScaledVector(camRight, -s * 0.5),
+        ], 0xff8800))
+        grp.add(mkLine([
+          c.clone().addScaledVector(camUp,  s * 0.5),
+          c.clone().addScaledVector(camUp, -s * 0.5),
+        ], 0xff8800))
+      }
+
+      scene.add(grp)
+      hoverHighlightRef.current = grp
+    }
+
+    function clearRubberBand() {
+      if (!rubberBandRef.current) return
+      scene.remove(rubberBandRef.current)
+      rubberBandRef.current.geometry.dispose()
+      rubberBandRef.current.material.dispose()
+      rubberBandRef.current = null
+    }
+
+    function updateRubberBand(p1, p2) {
+      if (!rubberBandRef.current) {
+        const arr = new Float32Array(6)
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+        const line = new THREE.Line(
+          geo,
+          new THREE.LineBasicMaterial({ color: 0xff6600, opacity: 0.55, transparent: true, depthTest: false }),
+        )
+        line.renderOrder = 98
+        scene.add(line)
+        rubberBandRef.current = line
+      }
+      const arr = rubberBandRef.current.geometry.attributes.position.array
+      arr[0] = p1.x; arr[1] = p1.y; arr[2] = p1.z
+      arr[3] = p2.x; arr[4] = p2.y; arr[5] = p2.z
+      rubberBandRef.current.geometry.attributes.position.needsUpdate = true
+    }
+
+    function onHoverMove(e) {
+      if (modeRef.current !== 'measure' || dragDimRef.current) {
+        clearHoverHighlight()
+        return
+      }
+      const rect = renderer.domElement.getBoundingClientRect()
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      const hit = getHitElement(mouse, camera, container)
+      updateHoverHighlight(hit)
+      // 1点目選択済みならゴムバンド線を更新
+      const sel1 = measureSel1Ref.current
+      if (sel1 && hit) {
+        updateRubberBand(sel1.point, hit.point)
+      } else {
+        clearRubberBand()
+      }
+    }
+
+    // onMouseDown を先に登録することで onRotateDown が dragDimRef を確認できる
+    renderer.domElement.addEventListener('mousedown', onMouseDown)
     renderer.domElement.addEventListener('mousedown', onRotateDown)   // 独自回転: ピボット確定
+    renderer.domElement.addEventListener('mousemove', onHoverMove)    // ホバーハイライト
     document.addEventListener('mousemove', onRotateMove)               // ドキュメント全体: 範囲外ドラッグ対応
     document.addEventListener('mouseup', onRotateUp)
-    renderer.domElement.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('mousemove', onDimDragMove)
+    document.addEventListener('mouseup', onDimDragEnd)
     renderer.domElement.addEventListener('mouseup', onMouseUp)
     renderer.domElement.addEventListener('wheel', onWheelZoom, { capture: true, passive: false })
 
@@ -628,6 +1063,12 @@ export default function StepViewer({ file, colors, lights }) {
     async function run() {
       try {
         setStatus('loading')
+        // 前回の解析結果・コメントをクリア
+        brepFacesMapRef.current.clear()
+        clearHoleAnnotations()
+        clearAllComments()
+        setHoleInfo(null)
+        setShowHolePanel(false)
 
         const initOcct = await loadOcct()
         const occt = await initOcct({
@@ -685,6 +1126,11 @@ export default function StepViewer({ file, colors, lights }) {
           solidMatRef.current = material
           group.add(m)
           meshes.push(m)
+
+          // B-rep面情報を保存（面ハイライト用）
+          if (mesh.brep_faces && mesh.brep_faces.length > 0) {
+            brepFacesMapRef.current.set(m, mesh.brep_faces)
+          }
 
           // 陰線消去用ベースメッシュ
           hlBaseGroup.add(new THREE.Mesh(
@@ -879,6 +1325,13 @@ export default function StepViewer({ file, colors, lights }) {
 
         applyDisplayMode(displayModeRef.current)
         setStatus('ok')
+
+        // 穴・円筒面の自動解析
+        const cylResult = analyzeCylinders()
+        if (cylResult.length > 0) {
+          createHoleAnnotations(cylResult)
+          setHoleInfo(cylResult)
+        }
       } catch (e) {
         if (!cancelled) { setStatus('error'); setErrorMsg(e.message || String(e)) }
       }
@@ -893,12 +1346,47 @@ export default function StepViewer({ file, colors, lights }) {
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('mousedown', onPanDown)
       document.removeEventListener('mousemove', onPanMove)
+      renderer.domElement.removeEventListener('mousedown', onMouseDown)
       renderer.domElement.removeEventListener('mousedown', onRotateDown)
+      renderer.domElement.removeEventListener('mousemove', onHoverMove)
       document.removeEventListener('mousemove', onRotateMove)
       document.removeEventListener('mouseup', onRotateUp)
-      renderer.domElement.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('mousemove', onDimDragMove)
+      document.removeEventListener('mouseup', onDimDragEnd)
       renderer.domElement.removeEventListener('mouseup', onMouseUp)
       renderer.domElement.removeEventListener('wheel', onWheelZoom, true)
+      // ホバー・ゴムバンドの破棄
+      if (hoverHighlightRef.current) {
+        scene.remove(hoverHighlightRef.current)
+        hoverHighlightRef.current.traverse(child => {
+          if (child.geometry && !child._sharedGeo) child.geometry.dispose()
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+            else child.material.dispose()
+          }
+        })
+        hoverHighlightRef.current = null
+      }
+      if (rubberBandRef.current) {
+        scene.remove(rubberBandRef.current)
+        rubberBandRef.current.geometry.dispose()
+        rubberBandRef.current.material.dispose()
+        rubberBandRef.current = null
+      }
+      // 配置済み寸法オブジェクトの破棄
+      const dimObjects = dimObjectsRef.current
+      dimObjects.forEach(obj => {
+        scene.remove(obj.group)
+        scene.remove(obj.labelObj)
+        obj.group.traverse(child => {
+          if (child.geometry) child.geometry.dispose()
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+            else child.material.dispose()
+          }
+        })
+      })
+      dimObjects.clear()
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode === container) container.removeChild(renderer.domElement)
@@ -911,73 +1399,856 @@ export default function StepViewer({ file, colors, lights }) {
     }
   }, [file])
 
-  // --- 寸法測定: 2点クリックで線とラベルを生成 ---
-  function handleMeasureClick(pt, scene) {
-    const markerR = modelSizeRef.current * 0.008
+  // --- 寸法測定: ヒット検出（面 or エッジ）---
+  function getHitElement(mouse, camera, container) {
+    const H = container.clientHeight
+    // OrthographicCamera: 1px あたりのワールド単位 = (top - bottom) / (zoom * H)
+    const worldPx = (camera.top - camera.bottom) / (camera.zoom * H)
+    const edgeThreshold = 15 * worldPx  // 15px 相当
+    const vertexThreshold = 14 * worldPx // 頂点スナップ閾値
 
-    if (!pendingPointRef.current) {
-      pendingPointRef.current = pt
-      setPendingPoint(pt)
+    const rc = new THREE.Raycaster()
+    rc.params.Line = { threshold: edgeThreshold }
+    rc.setFromCamera(mouse, camera)
 
-      const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(markerR, 12, 12),
-        new THREE.MeshBasicMaterial({ color: 0xff6600 }),
-      )
-      marker.position.copy(pt)
-      scene.add(marker)
-      pendingMarkerRef.current = marker
-    } else {
-      const p1 = pendingPointRef.current
-      const p2 = pt
-      const dist = p1.distanceTo(p2)
+    // エッジを優先（鋭角エッジ + 稜線）
+    const edgeTargets = [
+      ...(edgeGroupRef.current?.children ?? []),
+      ...(ridgeGroupRef.current?.children ?? []),
+    ]
+    if (edgeTargets.length) {
+      const hits = rc.intersectObjects(edgeTargets, false)
+      if (hits.length) {
+        const rawHit = hits[0]
+        const posArr = rawHit.object.geometry.attributes.position.array
+        const idx = rawHit.index ?? 0
+        const vA = new THREE.Vector3(posArr[idx * 3], posArr[idx * 3 + 1], posArr[idx * 3 + 2])
+          .applyMatrix4(rawHit.object.matrixWorld)
+        const vB = new THREE.Vector3(posArr[(idx + 1) * 3], posArr[(idx + 1) * 3 + 1], posArr[(idx + 1) * 3 + 2])
+          .applyMatrix4(rawHit.object.matrixWorld)
+        // 背面の面法線を取得（寸法移動方向の決定用）
+        const faceHits = rc.intersectObjects(meshesRef.current, false)
+        const faceNormal = faceHits.length
+          ? faceHits[0].face.normal.clone().transformDirection(faceHits[0].object.matrixWorld).normalize()
+          : null
+        // 端点に近ければ頂点ヒットとして返す
+        const dA = rawHit.point.distanceTo(vA)
+        const dB = rawHit.point.distanceTo(vB)
+        if (dA < vertexThreshold || dB < vertexThreshold) {
+          const vertexPos = dA <= dB ? vA : vB
+          return { type: 'vertex', point: vertexPos, normal: null, faceNormal, object: rawHit.object, rawHit }
+        }
+        return { type: 'edge', point: rawHit.point.clone(), normal: null, faceNormal, object: rawHit.object, rawHit }
+      }
+    }
 
-      scene.add(new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints([p1, p2]),
-        new THREE.LineBasicMaterial({ color: 0xff6600 }),
-      ))
+    // 面ヒット（法線・オブジェクト・生ヒット付き）
+    const faceHits = rc.intersectObjects(meshesRef.current, false)
+    if (faceHits.length) {
+      const hit = faceHits[0]
+      const worldNormal = hit.face.normal.clone()
+        .transformDirection(hit.object.matrixWorld)
+        .normalize()
+      return { type: 'face', point: hit.point.clone(), normal: worldNormal, object: hit.object, rawHit: hit }
+    }
 
-      const m2 = new THREE.Mesh(
-        new THREE.SphereGeometry(markerR, 12, 12),
-        new THREE.MeshBasicMaterial({ color: 0xff6600 }),
-      )
-      m2.position.copy(p2)
-      scene.add(m2)
+    return null
+  }
 
-      const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
-      const div = document.createElement('div')
-      div.textContent = `${dist.toFixed(2)} mm`
-      Object.assign(div.style, {
-        background: 'rgba(255,102,0,0.92)', color: '#fff',
-        padding: '2px 8px', borderRadius: '4px',
-        fontSize: '11px', fontWeight: 'bold',
-        whiteSpace: 'nowrap', fontFamily: 'monospace',
+  // --- 円筒面解析（穴径検出）---
+  function analyzeCylinders() {
+    const cylinders = []
+
+    for (const [meshObj, brepFaces] of brepFacesMapRef.current) {
+      const geo = meshObj.geometry
+      const posAttr = geo.attributes.position
+      const normAttr = geo.attributes.normal
+      const indexAttr = geo.index
+      if (!posAttr || !normAttr) continue
+
+      for (const face of brepFaces) {
+        const triCount = face.last - face.first + 1
+        if (triCount < 4) continue
+
+        // この面の頂点・法線を収集（重複排除）
+        const vertMap = new Map()
+        for (let t = face.first; t <= face.last; t++) {
+          for (let v = 0; v < 3; v++) {
+            const idx = indexAttr ? indexAttr.getX(t * 3 + v) : t * 3 + v
+            if (vertMap.has(idx)) continue
+            vertMap.set(idx, {
+              pos: new THREE.Vector3(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)),
+              norm: new THREE.Vector3(normAttr.getX(idx), normAttr.getY(idx), normAttr.getZ(idx)).normalize(),
+            })
+          }
+        }
+
+        const verts = Array.from(vertMap.values())
+        if (verts.length < 8) continue
+
+        // 平面チェック: 法線のばらつきが小さい面はスキップ
+        const n0 = verts[0].norm
+        let maxAngle = 0
+        for (const v of verts) {
+          const dot = Math.min(1, Math.abs(v.norm.dot(n0)))
+          const angle = Math.acos(dot)
+          if (angle > maxAngle) maxAngle = angle
+        }
+        if (maxAngle < 0.08) continue // ほぼ平面（< ~5°）
+
+        // 円筒軸を推定: 法線ペアの外積から軸方向候補を収集
+        const axisCandidates = []
+        const step = Math.max(1, Math.floor(verts.length / 15))
+        for (let i = 0; i < verts.length && axisCandidates.length < 12; i += step) {
+          for (let j = i + step; j < verts.length && axisCandidates.length < 12; j += step) {
+            const cross = new THREE.Vector3().crossVectors(verts[i].norm, verts[j].norm)
+            if (cross.length() < 0.05) continue
+            cross.normalize()
+            if (axisCandidates.length > 0 && cross.dot(axisCandidates[0]) < 0) cross.negate()
+            axisCandidates.push(cross)
+          }
+        }
+        if (axisCandidates.length < 3) continue
+
+        // 軸候補を平均
+        const axis = new THREE.Vector3()
+        for (const c of axisCandidates) axis.add(c)
+        axis.normalize()
+
+        // 軸候補の一貫性チェック
+        let axisConsistent = true
+        for (const c of axisCandidates) {
+          if (Math.abs(c.dot(axis)) < 0.92) { axisConsistent = false; break }
+        }
+        if (!axisConsistent) continue
+
+        // 全法線が軸に垂直であることを確認
+        let normalsPerpendicular = true
+        for (const v of verts) {
+          if (Math.abs(v.norm.dot(axis)) > 0.25) { normalsPerpendicular = false; break }
+        }
+        if (!normalsPerpendicular) continue
+
+        // 頂点を軸に垂直な平面に投影 → 半径を計算
+        // まず重心を計算
+        const centroid = new THREE.Vector3()
+        for (const v of verts) centroid.add(v.pos)
+        centroid.divideScalar(verts.length)
+
+        // 法線方向から円の中心を推定: 各頂点から法線の逆方向に進んだ先が中心
+        // 2点の法線の交差から中心を求める（2D投影上）
+        const axisX = new THREE.Vector3()
+        const axisY = new THREE.Vector3()
+        // 軸に垂直な2D座標系を構築
+        const tmpUp = Math.abs(axis.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)
+        axisX.crossVectors(axis, tmpUp).normalize()
+        axisY.crossVectors(axis, axisX).normalize()
+
+        // 各頂点の2D投影と法線の2D投影
+        const pts2d = verts.map(v => {
+          const rel = v.pos.clone().sub(centroid)
+          return {
+            x: rel.dot(axisX), y: rel.dot(axisY),
+            nx: v.norm.dot(axisX), ny: v.norm.dot(axisY),
+          }
+        })
+
+        // 2点の法線線分の交差で円中心を推定（複数ペアの平均）
+        let cx = 0, cy = 0, centerCount = 0
+        const pairStep = Math.max(1, Math.floor(pts2d.length / 10))
+        for (let i = 0; i < pts2d.length; i += pairStep) {
+          for (let j = i + pairStep; j < pts2d.length; j += pairStep) {
+            const a = pts2d[i], b = pts2d[j]
+            // 法線線: a.pos + t * a.norm = b.pos + s * b.norm
+            const det = a.nx * b.ny - a.ny * b.nx
+            if (Math.abs(det) < 0.01) continue
+            const t = ((b.x - a.x) * b.ny - (b.y - a.y) * b.nx) / det
+            cx += a.x + t * a.nx
+            cy += a.y + t * a.ny
+            centerCount++
+          }
+        }
+        if (centerCount < 2) continue
+        cx /= centerCount
+        cy /= centerCount
+
+        // 各頂点から中心までの距離 → 半径
+        const radii = pts2d.map(p => Math.hypot(p.x - cx, p.y - cy))
+        const meanR = radii.reduce((s, r) => s + r, 0) / radii.length
+        if (meanR < 0.01) continue
+
+        // 半径のばらつきチェック（標準偏差 / 平均 < 5%）
+        const variance = radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / radii.length
+        const stdDev = Math.sqrt(variance)
+        if (stdDev / meanR > 0.05) continue
+
+        // 360° カバー判定: 部分円筒（フィレット・面取り等）を除外
+        const angles = pts2d.map(p => Math.atan2(p.y - cy, p.x - cx))
+        angles.sort((a, b) => a - b)
+        // 隣接角度の最大ギャップを算出 → 360° - maxGap = カバー角度
+        let maxGap = 0
+        for (let i = 1; i < angles.length; i++) {
+          maxGap = Math.max(maxGap, angles[i] - angles[i - 1])
+        }
+        // 最初と最後の間のギャップ（2π を跨ぐ）
+        maxGap = Math.max(maxGap, (angles[0] + 2 * Math.PI) - angles[angles.length - 1])
+        const coverAngle = 2 * Math.PI - maxGap
+        if (coverAngle < Math.PI * 1.9) continue // ~342° 未満は部分円筒として除外
+
+        // 凹凸判定: 法線が中心に向かう → 穴、外向き → 外側円筒
+        let inwardCount = 0
+        for (const p of pts2d) {
+          const toCenterX = cx - p.x, toCenterY = cy - p.y
+          if (toCenterX * p.nx + toCenterY * p.ny > 0) inwardCount++
+        }
+        const isHole = inwardCount > pts2d.length * 0.5
+
+        // 軸方向の高さ & 中間高さの代表頂点を選出
+        let minH = Infinity, maxH = -Infinity
+        for (const v of verts) {
+          const h = v.pos.clone().sub(centroid).dot(axis)
+          if (h < minH) minH = h
+          if (h > maxH) maxH = h
+        }
+        const midH = (minH + maxH) / 2
+        let bestVert = verts[0], bestDist = Infinity
+        for (const v of verts) {
+          const d = Math.abs(v.pos.clone().sub(centroid).dot(axis) - midH)
+          if (d < bestDist) { bestDist = d; bestVert = v }
+        }
+
+        cylinders.push({
+          diameter: meanR * 2,
+          isHole,
+          height: maxH - minH,
+          anchorLocal: bestVert.pos.clone(),
+          normalLocal: bestVert.norm.clone(),
+          brepFace: { first: face.first, last: face.last },
+          meshObj,
+        })
+      }
+    }
+
+    // 径で丸め（0.01mm 単位）してグルーピング
+    const grouped = new Map()
+    for (const c of cylinders) {
+      const dRound = Math.round(c.diameter * 100) / 100
+      const key = `${dRound}_${c.isHole ? 'hole' : 'cyl'}`
+      if (!grouped.has(key)) {
+        grouped.set(key, { diameter: dRound, isHole: c.isHole, count: 0, instances: [] })
+      }
+      const g = grouped.get(key)
+      g.count++
+      g.instances.push({
+        anchorLocal: c.anchorLocal, normalLocal: c.normalLocal,
+        brepFace: c.brepFace, meshObj: c.meshObj,
       })
-      const label = new CSS2DObject(div)
-      label.position.copy(mid)
-      scene.add(label)
+    }
 
-      pendingPointRef.current = null
-      pendingMarkerRef.current = null
-      setPendingPoint(null)
+    // 径でソート
+    const result = Array.from(grouped.values()).sort((a, b) => a.diameter - b.diameter)
+    return result
+  }
+
+  // --- 穴・円筒アノテーション カラーパレット ---
+  const HOLE_PALETTE = [
+    { hex: 0xe08030, css: 'rgba(224,128,48,0.92)' },
+    { hex: 0x3080e0, css: 'rgba(48,128,224,0.92)' },
+    { hex: 0x40b060, css: 'rgba(64,176,96,0.92)' },
+    { hex: 0xc050a0, css: 'rgba(192,80,160,0.92)' },
+    { hex: 0xb0a030, css: 'rgba(176,160,48,0.92)' },
+    { hex: 0x40b0b0, css: 'rgba(64,176,176,0.92)' },
+  ]
+
+  // --- 穴・円筒アノテーション作成 ---
+  function createHoleAnnotations(holeData) {
+    clearHoleAnnotations()
+    const scene = sceneRef.current
+    if (!scene) return
+    const groupPos = solidGroupRef.current ? solidGroupRef.current.position : new THREE.Vector3()
+    // 径グループごとに記号を割り当て（H1=全φ2.53, H2=全φ3.50, ...）
+    let holeIdx = 1, cylIdx = 1
+    for (let gi = 0; gi < holeData.length; gi++) {
+      const group = holeData[gi]
+      const symbol = group.isHole ? `H${holeIdx++}` : `C${cylIdx++}`
+      group.symbol = symbol
+      const palette = HOLE_PALETTE[gi % HOLE_PALETTE.length]
+
+      for (let ii = 0; ii < group.instances.length; ii++) {
+        const inst = group.instances[ii]
+        const annotId = `${symbol}_${ii}`
+
+        // ローカル座標 → ワールド座標
+        const anchor = inst.anchorLocal.clone().add(groupPos)
+        const dir = inst.normalLocal.clone()
+        if (group.isHole) dir.negate()
+        dir.normalize()
+        const leaderLen = Math.min(group.diameter * 3, modelSizeRef.current * 0.15)
+        const labelPos = anchor.clone().addScaledVector(dir, leaderLen)
+
+        // CSS2D ラベル（pointerEvents: 'auto' でドラッグ確実化）
+        const div = document.createElement('div')
+        div._holeAnnotId = annotId
+        div.textContent = `${symbol} φ${group.diameter.toFixed(2)}`
+        Object.assign(div.style, {
+          background: palette.css, color: '#fff',
+          padding: '3px 10px', borderRadius: '4px',
+          fontSize: '13px', fontWeight: 'normal', whiteSpace: 'nowrap',
+          fontFamily: "'JetBrains Mono', monospace",
+          cursor: 'grab', userSelect: 'none', pointerEvents: 'auto',
+          transition: 'background 120ms, box-shadow 120ms',
+        })
+        div.addEventListener('mouseenter', () => { div.style.boxShadow = '0 0 0 2px rgba(255,255,255,0.6)' })
+        div.addEventListener('mouseleave', () => { div.style.boxShadow = 'none' })
+        // ラベル直接の mousedown でドラッグ開始（CSS2DRenderer の pointerEvents:none を回避）
+        div.addEventListener('mousedown', (e) => {
+          if (e.button !== 0) return
+          e.stopPropagation()
+          const labelObj = holeAnnotationsRef.current.get(annotId)?.labelObj
+          if (labelObj) {
+            dragDimRef.current = { type: 'holeAnnot', id: annotId, labelObj, lastX: e.clientX, lastY: e.clientY }
+          }
+        })
+        const labelObj = new CSS2DObject(div)
+        labelObj.position.copy(labelPos)
+        labelObj.visible = false
+
+        // 引き出し線
+        const lnArr = new Float32Array([anchor.x, anchor.y, anchor.z, labelPos.x, labelPos.y, labelPos.z])
+        const lnGeo = new THREE.BufferGeometry()
+        lnGeo.setAttribute('position', new THREE.BufferAttribute(lnArr, 3))
+        const leader = new THREE.Line(lnGeo, new THREE.LineBasicMaterial({
+          color: palette.hex, depthTest: false, transparent: true, opacity: 0.7,
+        }))
+        leader.renderOrder = 99
+        leader.visible = false
+
+        // アンカーマーカー（線ベース矢印 — 4本の線で全方向から視認可能）
+        const arrow = makeLineArrow(anchor, labelPos, palette.hex, modelSizeRef.current)
+        arrow.visible = false
+
+        // 面カラーオーバーレイ（brep_face の三角形を抽出して着色）
+        let overlay = null
+        if (inst.brepFace && inst.meshObj) {
+          const bf = inst.brepFace
+          const srcGeo = inst.meshObj.geometry
+          const idxAttr = srcGeo.index
+          const posAttr = srcGeo.attributes.position
+          const normAttr = srcGeo.attributes.normal
+          const triCount = bf.last - bf.first + 1
+          const vertCount = triCount * 3
+          const positions = new Float32Array(vertCount * 3)
+          const normals = normAttr ? new Float32Array(vertCount * 3) : null
+          for (let t = 0; t < triCount; t++) {
+            for (let v = 0; v < 3; v++) {
+              const srcIdx = idxAttr ? idxAttr.getX((bf.first + t) * 3 + v) : (bf.first + t) * 3 + v
+              const dst = (t * 3 + v) * 3
+              positions[dst]     = posAttr.getX(srcIdx)
+              positions[dst + 1] = posAttr.getY(srcIdx)
+              positions[dst + 2] = posAttr.getZ(srcIdx)
+              if (normals) {
+                normals[dst]     = normAttr.getX(srcIdx)
+                normals[dst + 1] = normAttr.getY(srcIdx)
+                normals[dst + 2] = normAttr.getZ(srcIdx)
+              }
+            }
+          }
+          const faceGeo = new THREE.BufferGeometry()
+          faceGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+          if (normals) faceGeo.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+          overlay = new THREE.Mesh(faceGeo, new THREE.MeshBasicMaterial({
+            color: palette.hex, transparent: true, opacity: 0.35,
+            side: THREE.DoubleSide, depthTest: true,
+            polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+          }))
+          overlay.matrix.copy(inst.meshObj.matrixWorld)
+          overlay.matrixAutoUpdate = false
+          overlay.renderOrder = 50
+          overlay.visible = false
+          scene.add(overlay)
+        }
+
+        scene.add(labelObj)
+        scene.add(leader)
+        scene.add(arrow)
+
+        holeAnnotationsRef.current.set(annotId, { labelObj, leader, arrow, overlay, anchor: anchor.clone() })
+      }
     }
   }
 
-  // --- コメント追加 ---
+  // --- 穴・円筒アノテーション削除 ---
+  function clearHoleAnnotations() {
+    const scene = sceneRef.current
+    if (!scene) return
+    for (const [, obj] of holeAnnotationsRef.current) {
+      scene.remove(obj.labelObj)
+      scene.remove(obj.leader)
+      scene.remove(obj.arrow)
+      obj.leader.geometry.dispose()
+      obj.leader.material.dispose()
+      obj.arrow.geometry.dispose()
+      obj.arrow.material.dispose()
+      if (obj.overlay) {
+        scene.remove(obj.overlay)
+        obj.overlay.geometry.dispose()
+        obj.overlay.material.dispose()
+      }
+    }
+    holeAnnotationsRef.current.clear()
+  }
+
+  // --- 穴アノテーション表示切替 ---
+  function setHoleAnnotationsVisible(visible) {
+    for (const [, obj] of holeAnnotationsRef.current) {
+      obj.labelObj.visible = visible
+      obj.leader.visible = visible
+      obj.arrow.visible = visible
+      if (obj.overlay) obj.overlay.visible = visible
+    }
+  }
+
+  // --- 2選択から計測値を算出 ---
+  function computeMeasurement(sel1, sel2) {
+    // 面法線を収集（寸法移動方向の決定に使用）
+    const faceNormal = sel1.type === 'face' ? sel1.normal.clone()
+                     : sel2.type === 'face' ? sel2.normal.clone()
+                     : sel1.faceNormal ? sel1.faceNormal.clone()
+                     : sel2.faceNormal ? sel2.faceNormal.clone()
+                     : null
+    if (sel1.type === 'face') {
+      // 面法線方向への投影距離
+      const n    = sel1.normal
+      const diff = sel2.point.clone().sub(sel1.point)
+      const proj = diff.dot(n)
+      const p1   = sel1.point.clone()
+      const p2   = sel1.point.clone().addScaledVector(n, proj)
+      return { p1, p2, pA: sel1.point.clone(), pB: sel2.point.clone(), distance: Math.abs(proj), type: 'normal', faceNormal }
+    }
+    // エッジ/エッジ or エッジ/面 → 直線距離
+    const p1 = sel1.point.clone()
+    const p2 = sel2.point.clone()
+    return { p1, p2, pA: p1.clone(), pB: p2.clone(), distance: p1.distanceTo(p2), type: 'linear', faceNormal }
+  }
+
+  // --- 寸法オブジェクトをシーンに追加 ---
+  function createDimension(id, meas, scene) {
+    const { p1, p2, pA, pB, distance } = meas
+    const markerR = modelSizeRef.current * 0.008
+    const COLOR   = 0xff6600
+
+    // 寸法線方向
+    const lineDirNorm = p2.clone().sub(p1).normalize()
+
+    // 引き出し方向の候補を X/Y/Z 軸から2つ選択（dimDir に垂直度が高い順）
+    const axes = [
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Vector3(0, 0, 1),
+    ]
+    const sorted = axes
+      .map((a, i) => ({ axis: a, dot: Math.abs(lineDirNorm.dot(a)), i }))
+      .sort((a, b) => a.dot - b.dot)
+    // perpCandidates[0] = 最も垂直, perpCandidates[1] = 次に垂直
+    const perpCandidates = [sorted[0].axis.clone(), sorted[1].axis.clone()]
+    const perpDir = perpCandidates[0]
+
+    // 第3方向（寸法平面の法線）= dimDir × perpDir（デフォルト perpDir で投影）
+    const thirdDir = new THREE.Vector3().crossVectors(lineDirNorm, perpDir).normalize()
+
+    // pA, pB を寸法平面に投影（平面は pA を通り、法線は thirdDir）
+    const pA_proj = pA.clone()
+    const pB_offPlane = pB.clone().sub(pA).dot(thirdDir)
+    const pB_proj = pB.clone().addScaledVector(thirdDir, -pB_offPlane)
+
+    // 寸法線グループ（矢印・寸法線本体 — ドラッグ時にグループごと移動）
+    const group = new THREE.Group()
+
+    const arrowH = markerR * 2.0
+    const arrowR = markerR * 0.62
+    const yAxis = new THREE.Vector3(0, 1, 0)
+
+    // 矢印コーンにクリック判定用の拡大ヒットエリアを追加
+    const cones = []
+    function addArrow(tipPos, pointDir) {
+      const cone = new THREE.Mesh(
+        new THREE.ConeGeometry(arrowR, arrowH, 10),
+        new THREE.MeshBasicMaterial({ color: COLOR, depthTest: false }),
+      )
+      cone.renderOrder = 101
+      cone.position.copy(tipPos).addScaledVector(pointDir, -arrowH / 2)
+      if (Math.abs(pointDir.dot(yAxis)) < 0.9999) {
+        cone.quaternion.setFromUnitVectors(yAxis, pointDir)
+      } else if (pointDir.y < 0) {
+        cone.rotation.x = Math.PI
+      }
+      cone._dimId = id
+      // クリックしやすいように透明な拡大ヒットエリアを追加
+      const hitArea = new THREE.Mesh(
+        new THREE.SphereGeometry(arrowH * 2.5, 8, 8),
+        new THREE.MeshBasicMaterial({ visible: false }),
+      )
+      hitArea._dimId = id
+      hitArea.position.copy(cone.position)
+      group.add(cone)
+      group.add(hitArea)
+      cones.push(cone, hitArea)
+    }
+
+    // 投影後の寸法線方向
+    const projDimVec = pB_proj.clone().sub(pA_proj)
+    const projDist = projDimVec.length()
+    const projDimDir = projDist > 0.0001 ? projDimVec.normalize() : lineDirNorm.clone()
+
+    addArrow(pA_proj, projDimDir.clone())
+    addArrow(pB_proj, projDimDir.clone().negate())
+
+    // 寸法線本体（矢印の基部間）
+    if (projDist > arrowH * 2.5) {
+      const ls = pA_proj.clone().addScaledVector(projDimDir, arrowH)
+      const le = pB_proj.clone().addScaledVector(projDimDir, -arrowH)
+      const ln = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([ls, le]),
+        new THREE.LineBasicMaterial({ color: COLOR, depthTest: false }),
+      )
+      ln.renderOrder = 100
+      group.add(ln)
+    }
+
+    // CSS2D ラベル（寸法線の中点に配置）
+    const mid = pA_proj.clone().add(pB_proj).multiplyScalar(0.5)
+    const div = document.createElement('div')
+    div._dimId = id
+    div.textContent = `${distance.toFixed(2)} mm`
+    Object.assign(div.style, {
+      background: 'rgba(255,102,0,0.92)', color: '#fff',
+      padding: '3px 10px', borderRadius: '4px',
+      fontSize: '13px', fontWeight: 'normal',
+      whiteSpace: 'nowrap', fontFamily: 'monospace',
+      cursor: 'grab', userSelect: 'none', pointerEvents: 'auto',
+      transition: 'background 120ms, box-shadow 120ms',
+    })
+    div.addEventListener('mouseenter', () => {
+      div.style.background = 'rgba(220,80,0,0.97)'
+      div.style.boxShadow = '0 0 0 2px rgba(255,153,68,0.7)'
+    })
+    div.addEventListener('mouseleave', () => {
+      const sel = selectedDimIdRef.current
+      const myId = div._dimId
+      div.style.background = sel === myId ? 'rgba(200,70,0,0.97)' : 'rgba(255,102,0,0.92)'
+      div.style.boxShadow = sel === myId ? '0 0 0 2px #ff9944' : 'none'
+    })
+    const labelObj = new CSS2DObject(div)
+    labelObj.position.copy(mid)
+    // ラベル直接 mousedown → ラベルのみ移動ドラッグ開始
+    div.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return
+      e.stopPropagation()
+      dragDimRef.current = { type: 'dimLabel', id, labelObj, lastX: e.clientX, lastY: e.clientY }
+      selectedDimIdRef.current = id
+      setSelectedDimId(id)
+    })
+
+    // 共通の線マテリアル
+    const extMat = new THREE.LineBasicMaterial({ color: COLOR, opacity: 0.55, transparent: true, depthTest: false })
+    function makeExtLine(from, to) {
+      const arr = new Float32Array([from.x, from.y, from.z, to.x, to.y, to.z])
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+      const ln = new THREE.Line(geo, extMat.clone())
+      ln.renderOrder = 99
+      return ln
+    }
+
+    // 引き出し線（投影点 → 寸法線端点 — ドラッグ時に動的更新、初期は長さ0）
+    const ext1 = makeExtLine(pA_proj, pA_proj)
+    const ext2 = makeExtLine(pB_proj, pB_proj)
+
+    // サポート線（実ピックポイント → 投影点、平面外の場合のみ表示）
+    const sup1 = makeExtLine(pA, pA_proj)
+    const sup2 = makeExtLine(pB, pB_proj)
+    const eps = modelSizeRef.current * 0.001
+    sup1.visible = pA.distanceTo(pA_proj) > eps
+    sup2.visible = pB.distanceTo(pB_proj) > eps
+
+    // リーダー線（ラベルが寸法線中点から離れたときに表示）
+    const leader = makeExtLine(mid, mid)
+    leader.visible = false
+
+    scene.add(group)
+    scene.add(labelObj)
+    scene.add(ext1)
+    scene.add(ext2)
+    scene.add(sup1)
+    scene.add(sup2)
+    scene.add(leader)
+
+    dimObjectsRef.current.set(id, {
+      group, labelObj, cones,            // cones: レイキャスト用の矢印メッシュ配列
+      p1: pA_proj.clone(), p2: pB_proj.clone(), // 現在の寸法線端点位置（ドラッグで更新）
+      pA: pA.clone(), pB: pB.clone(),            // 実ピックポイント（固定）
+      pA_proj: pA_proj.clone(), pB_proj: pB_proj.clone(), // 平面投影点（固定、引き出し線の起点）
+      ext1, ext2,                       // 引き出し線（投影点 → 寸法線端点）
+      sup1, sup2,                       // サポート線（実ピックポイント → 投影点）
+      leader,                           // リーダー線（ラベル⇔寸法線中点）
+      dimDir: projDimDir.clone(),       // 寸法線方向（投影後）
+      perpCandidates,                   // 引き出し方向の候補2軸（X/Y/Z軸）
+      offset: new THREE.Vector3(),      // 垂直オフセット（累積）
+    })
+    setDimensions(prev => [...prev, { id, distance }])
+  }
+
+  // --- 寸法削除 ---
+  function deleteDimension(id) {
+    const scene = sceneRef.current
+    if (!scene) return
+    const obj = dimObjectsRef.current.get(id)
+    if (!obj) return
+
+    scene.remove(obj.group)
+    scene.remove(obj.labelObj)
+    const disposeLine = (ln) => { if (ln) { scene.remove(ln); ln.geometry.dispose(); ln.material.dispose() } }
+    disposeLine(obj.ext1)
+    disposeLine(obj.ext2)
+    disposeLine(obj.sup1)
+    disposeLine(obj.sup2)
+    disposeLine(obj.leader)
+    obj.group.traverse(child => {
+      if (child.geometry) child.geometry.dispose()
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+        else child.material.dispose()
+      }
+    })
+
+    dimObjectsRef.current.delete(id)
+    setDimensions(prev => prev.filter(d => d.id !== id))
+    if (selectedDimIdRef.current === id) {
+      selectedDimIdRef.current = null
+      setSelectedDimId(null)
+    }
+  }
+
+  // --- 寸法測定クリックハンドラ（onMouseUp から呼ぶ）---
+  function handleMeasureClick(mouse, scene, camera, container) {
+    const hit = getHitElement(mouse, camera, container)
+    if (!hit) return
+
+    const sel1 = measureSel1Ref.current
+    if (!sel1) {
+      // 1点目: 記憶 + 現在のホバーハイライトを sel1Highlight として維持
+      measureSel1Ref.current = hit
+      setMeasureSel1(hit)
+      // ホバーハイライトを sel1Highlight に移管（dispose せず維持）
+      if (hoverHighlightRef.current) {
+        sel1HighlightRef.current = hoverHighlightRef.current
+        hoverHighlightRef.current = null
+      }
+    } else {
+      // 2点目: 寸法を確定・配置
+      const meas = computeMeasurement(sel1, hit)
+      createDimension(`dim_${Date.now()}`, meas, scene)
+
+      // ゴムバンド・ホバーハイライト・sel1ハイライトをクリア
+      const clearObj = (ref) => {
+        if (!ref.current) return
+        scene.remove(ref.current)
+        ref.current.traverse(child => {
+          if (child.geometry && !child._sharedGeo) child.geometry.dispose()
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+            else child.material.dispose()
+          }
+        })
+        ref.current = null
+      }
+      if (rubberBandRef.current) {
+        scene.remove(rubberBandRef.current)
+        rubberBandRef.current.geometry.dispose()
+        rubberBandRef.current.material.dispose()
+        rubberBandRef.current = null
+      }
+      clearObj(hoverHighlightRef)
+      clearObj(sel1HighlightRef)
+      measureSel1Ref.current = null
+      setMeasureSel1(null)
+    }
+  }
+
+  // --- 線ベース矢印の作成・更新 ---
+  function makeLineArrow(tip, from, color, modelSize) {
+    // tip を先端として from 方向に開く 4 本線（どの視点からでも見える）
+    const h = modelSize * 0.012
+    const s = modelSize * 0.005
+    const dir = tip.clone().sub(from).normalize()
+    // dir に垂直な2軸を生成
+    const tmp = Math.abs(dir.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)
+    const u = new THREE.Vector3().crossVectors(dir, tmp).normalize()
+    const v = new THREE.Vector3().crossVectors(dir, u).normalize()
+    const back = dir.clone().negate()
+    const pts = [
+      tip, tip.clone().addScaledVector(back, h).addScaledVector(u, s),
+      tip, tip.clone().addScaledVector(back, h).addScaledVector(u, -s),
+      tip, tip.clone().addScaledVector(back, h).addScaledVector(v, s),
+      tip, tip.clone().addScaledVector(back, h).addScaledVector(v, -s),
+    ]
+    const geo = new THREE.BufferGeometry().setFromPoints(pts)
+    const arrow = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      color, depthTest: false,
+    }))
+    arrow.renderOrder = 100
+    return arrow
+  }
+
+  function updateLineArrow(arrow, tip, from, modelSize) {
+    const h = modelSize * 0.012
+    const s = modelSize * 0.005
+    const dir = tip.clone().sub(from).normalize()
+    const tmp = Math.abs(dir.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)
+    const u = new THREE.Vector3().crossVectors(dir, tmp).normalize()
+    const v = new THREE.Vector3().crossVectors(dir, u).normalize()
+    const back = dir.clone().negate()
+    const positions = arrow.geometry.attributes.position.array
+    const wings = [
+      tip.clone().addScaledVector(back, h).addScaledVector(u, s),
+      tip.clone().addScaledVector(back, h).addScaledVector(u, -s),
+      tip.clone().addScaledVector(back, h).addScaledVector(v, s),
+      tip.clone().addScaledVector(back, h).addScaledVector(v, -s),
+    ]
+    for (let i = 0; i < 4; i++) {
+      const base = i * 6
+      positions[base]     = tip.x; positions[base + 1] = tip.y; positions[base + 2] = tip.z
+      positions[base + 3] = wings[i].x; positions[base + 4] = wings[i].y; positions[base + 5] = wings[i].z
+    }
+    arrow.geometry.attributes.position.needsUpdate = true
+  }
+
+  // --- コメント全削除 ---
+  function clearAllComments() {
+    const scene = sceneRef.current
+    if (!scene) return
+    for (const [, obj] of commentObjectsRef.current) {
+      scene.remove(obj.labelObj)
+      scene.remove(obj.leader)
+      scene.remove(obj.arrow)
+      obj.leader.geometry.dispose()
+      obj.leader.material.dispose()
+      obj.arrow.geometry.dispose()
+      obj.arrow.material.dispose()
+    }
+    commentObjectsRef.current.clear()
+  }
+
+  // --- コメント追加（引き出し線 + ドラッグ移動対応）---
   function submitComment(worldPos, text) {
     if (!text.trim() || !sceneRef.current) return
+    const scene = sceneRef.current
+    const commentId = `cmt_${Date.now()}`
+    const COLOR = 0x3b82f6
+    const offsetDist = modelSizeRef.current * 0.1
+    const anchor = worldPos.clone()
 
-    const pin = document.createElement('div')
-    pin.style.cssText = 'display:flex;align-items:flex-start;gap:5px;pointer-events:none;'
-    pin.innerHTML = `
-      <div style="width:8px;height:8px;border-radius:50%;background:#3b82f6;
-        flex-shrink:0;margin-top:3px;box-shadow:0 0 0 2px rgba(59,130,246,0.35);"></div>
-      <div style="background:rgba(15,23,42,0.95);border:1px solid rgba(59,130,246,0.5);
-        color:#e2e8f0;padding:3px 8px;border-radius:5px;font-size:11px;
-        max-width:160px;word-break:break-word;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
-    `
-    const labelObj = new CSS2DObject(pin)
-    labelObj.position.copy(worldPos)
-    sceneRef.current.add(labelObj)
+    // ラベル位置（アンカーから少しオフセット）
+    const cam = cameraRef.current
+    const camUp = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1).normalize()
+    const labelPos = anchor.clone().addScaledVector(camUp, offsetDist)
+
+    // CSS2D ラベル
+    const div = document.createElement('div')
+    div._commentId = commentId
+    div.textContent = text.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    Object.assign(div.style, {
+      background: 'rgba(15,23,42,0.95)', color: '#e2e8f0',
+      border: '1px solid rgba(59,130,246,0.5)',
+      padding: '3px 10px', borderRadius: '5px',
+      fontSize: '13px', fontWeight: 'normal',
+      maxWidth: '180px', wordBreak: 'break-word',
+      fontFamily: "'Noto Sans JP', sans-serif",
+      cursor: 'grab', userSelect: 'none', pointerEvents: 'auto',
+      transition: 'box-shadow 120ms',
+    })
+    div.addEventListener('mouseenter', () => {
+      if (!div._editing) div.style.boxShadow = '0 0 0 2px rgba(59,130,246,0.5)'
+    })
+    div.addEventListener('mouseleave', () => {
+      if (!div._editing) div.style.boxShadow = 'none'
+    })
+    const labelObj = new CSS2DObject(div)
+    labelObj.position.copy(labelPos)
+    // ラベル直接 mousedown でドラッグ開始（編集中はドラッグ無効）
+    div.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || div._editing) return
+      e.stopPropagation()
+      dragDimRef.current = { type: 'comment', id: commentId, labelObj, lastX: e.clientX, lastY: e.clientY }
+    })
+    // ダブルクリックでインライン編集
+    div.addEventListener('dblclick', (e) => {
+      e.stopPropagation()
+      if (div._editing) return
+      div._editing = true
+      div.contentEditable = 'true'
+      div.style.cursor = 'text'
+      div.style.userSelect = 'text'
+      div.style.outline = 'none'
+      div.style.boxShadow = '0 0 0 2px #3b82f6'
+      div.style.background = 'rgba(15,23,42,1)'
+      div.focus()
+      // テキスト全選択
+      const range = document.createRange()
+      range.selectNodeContents(div)
+      const sel = window.getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+    })
+    // 編集確定（フォーカスアウト or Enter）
+    function finishEdit() {
+      if (!div._editing) return
+      div._editing = false
+      div.contentEditable = 'false'
+      div.style.cursor = 'grab'
+      div.style.userSelect = 'none'
+      div.style.boxShadow = 'none'
+      div.style.background = 'rgba(15,23,42,0.95)'
+      // 空になったら削除
+      if (!div.textContent.trim()) {
+        const cObj = commentObjectsRef.current.get(commentId)
+        if (cObj && sceneRef.current) {
+          sceneRef.current.remove(cObj.labelObj)
+          sceneRef.current.remove(cObj.leader)
+          sceneRef.current.remove(cObj.arrow)
+          cObj.leader.geometry.dispose()
+          cObj.leader.material.dispose()
+          cObj.arrow.geometry.dispose()
+          cObj.arrow.material.dispose()
+          commentObjectsRef.current.delete(commentId)
+        }
+      }
+    }
+    div.addEventListener('blur', finishEdit)
+    div.addEventListener('keydown', (e) => {
+      if (!div._editing) return
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); div.blur() }
+      if (e.key === 'Escape') { div.blur() }
+      e.stopPropagation() // キーイベントがビューアに伝搬しないようにする
+    })
+
+    // 引き出し線
+    const lnArr = new Float32Array([anchor.x, anchor.y, anchor.z, labelPos.x, labelPos.y, labelPos.z])
+    const lnGeo = new THREE.BufferGeometry()
+    lnGeo.setAttribute('position', new THREE.BufferAttribute(lnArr, 3))
+    const leader = new THREE.Line(lnGeo, new THREE.LineBasicMaterial({
+      color: COLOR, depthTest: false, transparent: true, opacity: 0.6,
+    }))
+    leader.renderOrder = 99
+
+    // アンカー矢印（線ベース）
+    const arrow = makeLineArrow(anchor, labelPos, COLOR, modelSizeRef.current)
+
+    scene.add(labelObj)
+    scene.add(leader)
+    scene.add(arrow)
+
+    commentObjectsRef.current.set(commentId, { labelObj, leader, arrow, anchor: anchor.clone() })
 
     setCommentInput(null)
     setCommentText('')
@@ -1064,8 +2335,66 @@ export default function StepViewer({ file, colors, lights }) {
     requestAnimationFrame(frame)
   }
 
+  // --- 穴アノテーション表示切替 ---
+  useEffect(() => {
+    setHoleAnnotationsVisible(showHolePanel)
+  }, [showHolePanel])
+
+  // --- 選択中の寸法ラベルをハイライト ---
+  useEffect(() => {
+    dimObjectsRef.current.forEach((obj, id) => {
+      obj.labelObj.element.style.background =
+        id === selectedDimId ? 'rgba(200,70,0,0.97)' : 'rgba(255,102,0,0.92)'
+      obj.labelObj.element.style.boxShadow =
+        id === selectedDimId ? '0 0 0 2px #ff9944' : 'none'
+    })
+  }, [selectedDimId])
+
+  // --- キーボード操作: Delete/Backspace で寸法削除、ESC で1点目解除 ---
+  useEffect(() => {
+    function onKeyDown(e) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDimIdRef.current) {
+        e.preventDefault()
+        deleteDimension(selectedDimIdRef.current)
+      }
+      if (e.key === 'Escape' && modeRef.current === 'measure' && measureSel1Ref.current) {
+        e.preventDefault()
+        measureSel1Ref.current = null
+        setMeasureSel1(null)
+        // sel1 ハイライト・ゴムバンドをクリア
+        const scene = sceneRef.current
+        if (scene) {
+          const clearGrp = (ref) => {
+            if (!ref.current) return
+            scene.remove(ref.current)
+            ref.current.traverse(child => {
+              if (child.geometry && !child._sharedGeo) child.geometry.dispose()
+              if (child.material) {
+                if (Array.isArray(child.material)) child.material.forEach(m => m.dispose())
+                else child.material.dispose()
+              }
+            })
+            ref.current = null
+          }
+          clearGrp(sel1HighlightRef)
+          if (rubberBandRef.current) {
+            scene.remove(rubberBandRef.current)
+            rubberBandRef.current.geometry.dispose()
+            rubberBandRef.current.material.dispose()
+            rubberBandRef.current = null
+          }
+        }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  const sel1TypeLabel = measureSel1?.type === 'face' ? '面' : measureSel1?.type === 'vertex' ? '頂点' : 'エッジ'
   const modeHint = mode === 'measure'
-    ? (pendingPoint ? '2点目をクリックしてください' : '1点目をクリックしてください')
+    ? (measureSel1
+        ? `2点目を選択（${sel1TypeLabel}選択済み — ESC で解除）`
+        : '面・エッジ・頂点をクリックして1点目を選択')
     : 'コメントを追加したい点をクリック'
 
   return (
@@ -1115,15 +2444,80 @@ export default function StepViewer({ file, colors, lights }) {
               {ICONS[key]}
             </button>
           ))}
+
+          {/* セパレータ + 穴情報ボタン */}
+          {holeInfo && holeInfo.length > 0 && (
+            <>
+              <span style={{ width: 1, background: '#e5e7eb', margin: '4px 2px', display: 'inline-block', alignSelf: 'stretch' }} />
+              <button
+                title="穴・円筒面情報"
+                onClick={() => setShowHolePanel(v => !v)}
+                style={showHolePanel
+                  ? { background: '#ecfdf5', color: '#065f46', border: '1px solid #6ee7b7', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }
+                  : { background: 'transparent', color: '#9ca3af', border: '1px solid transparent', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                onMouseEnter={e => { if (!showHolePanel) e.currentTarget.style.color = '#374151' }}
+                onMouseLeave={e => { if (!showHolePanel) e.currentTarget.style.color = '#9ca3af' }}
+              >
+                {ICONS.holeInfo}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* 穴・円筒面情報パネル */}
+      {showHolePanel && holeInfo && (
+        <div className="absolute top-14 right-4 z-30" style={{ width: 260, background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '12px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: 360, overflowY: 'auto' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: '0.15em', color: '#6b7280', textTransform: 'uppercase' }}>穴・円筒面情報</span>
+            <button onClick={() => setShowHolePanel(false)} style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>✕</button>
+          </div>
+          <div style={{ height: 1, background: '#e5e7eb', marginBottom: 8 }} />
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: "'Noto Sans JP', sans-serif" }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #e5e7eb' }}>
+                <th style={{ textAlign: 'left', padding: '4px 6px', color: '#6b7280', fontWeight: 500, fontSize: 11 }}>記号</th>
+                <th style={{ textAlign: 'left', padding: '4px 6px', color: '#6b7280', fontWeight: 500, fontSize: 11 }}>種別</th>
+                <th style={{ textAlign: 'right', padding: '4px 6px', color: '#6b7280', fontWeight: 500, fontSize: 11 }}>径 (mm)</th>
+                <th style={{ textAlign: 'right', padding: '4px 6px', color: '#6b7280', fontWeight: 500, fontSize: 11 }}>個数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {holeInfo.map((item, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                  <td style={{ padding: '4px 6px', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, fontWeight: 600, color: item.isHole ? '#b45309' : '#4b5563' }}>
+                    {item.symbol || '—'}
+                  </td>
+                  <td style={{ padding: '4px 6px', color: item.isHole ? '#b45309' : '#4b5563' }}>
+                    {item.isHole ? '穴' : '円筒'}
+                  </td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#111827' }}>
+                    φ{item.diameter.toFixed(2)}
+                  </td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#111827', fontWeight: 600 }}>
+                    {item.count}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 8, fontSize: 10, color: '#9ca3af', fontFamily: "'JetBrains Mono', monospace", textAlign: 'center' }}>
+            メッシュ解析による推定値
+          </div>
         </div>
       )}
 
       {/* モードヒント */}
       {status === 'ok' && mode !== 'navigate' && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex flex-col items-center gap-1">
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: '0.08em', padding: '4px 14px', borderRadius: 99, background: mode === 'measure' ? '#fef3c7' : '#eff6ff', color: mode === 'measure' ? '#92400e' : '#1d4ed8', border: `1px solid ${mode === 'measure' ? '#fcd34d' : '#bfdbfe'}` }}>
             {modeHint}
           </span>
+          {mode === 'measure' && selectedDimId && (
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '0.06em', padding: '3px 12px', borderRadius: 99, background: 'rgba(200,70,0,0.12)', color: '#b84500', border: '1px solid rgba(200,70,0,0.3)' }}>
+              寸法を選択中 — Delete / Backspace で削除
+            </span>
+          )}
         </div>
       )}
 

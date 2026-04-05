@@ -119,9 +119,8 @@ function App() {
       {/* Header */}
       <header style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }} className="px-6 py-3 flex items-center gap-4">
         <div className="flex items-center gap-2">
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, letterSpacing: '0.18em', color: '#6b7280', textTransform: 'uppercase' }}>CAD</span>
-          <span style={{ width: 1, height: 14, background: '#e5e7eb', display: 'inline-block' }} />
-          <h1 style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 17, fontWeight: 600, color: '#111827', letterSpacing: '-0.01em' }}>CAD Viewer</h1>
+          <h1 style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 17, fontWeight: 600, color: '#111827', letterSpacing: '-0.01em' }}>BlueMark</h1>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '0.12em', color: '#9ca3af', textTransform: 'uppercase' }}>Beyond the Blueprint</span>
         </div>
         {file && (
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#6b7280', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, padding: '2px 10px' }} className="truncate max-w-xs">
