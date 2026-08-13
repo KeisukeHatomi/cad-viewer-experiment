@@ -85,7 +85,7 @@ const CUBE_FACES = [
   { key: 'back',   label: '背面', cssTransform: `rotateX(90deg) translateZ(${CUBE_H}px)`,  dirArr: [ 0,  1,  0], upArr: [0, 0, 1] },
 ]
 
-export default function StepViewer({ file, colors, lights }) {
+export default function StepViewer({ file, meshParams, colors, lights }) {
   const mountRef = useRef(null)
   const [status, setStatus] = useState('idle') // 'idle'|'loading'|'ok'|'error'
   const [errorMsg, setErrorMsg] = useState('')
@@ -1084,6 +1084,9 @@ export default function StepViewer({ file, colors, lights }) {
         setHoleInfo(null)
         setShowHolePanel(false)
 
+        // ローディング UI を確実にレンダリングしてから WASM を起動する
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+
         const initOcct = await loadOcct()
         const occt = await initOcct({
           locateFile: (name) => `/${name}`,
@@ -1092,7 +1095,11 @@ export default function StepViewer({ file, colors, lights }) {
         if (cancelled) return
 
         const buffer = await file.arrayBuffer()
-        const result = occt.ReadStepFile(new Uint8Array(buffer), null)
+
+        // WASM はメインスレッドをブロックするため、直前に再度フレームを譲る
+        await new Promise(resolve => requestAnimationFrame(resolve))
+
+        const result = occt.ReadStepFile(new Uint8Array(buffer), meshParams ?? null)
 
         if (!result.success) {
           throw new Error('STEP ファイルの解析に失敗しました')
@@ -2575,12 +2582,17 @@ export default function StepViewer({ file, colors, lights }) {
         </div>
       )}
 
-      {/* ステータス */}
+      {/* ローディングオーバーレイ */}
       {status === 'loading' && (
-        <div className="absolute inset-x-0 top-4 flex justify-center z-10 pointer-events-none">
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: '0.1em', color: '#6b7280', background: 'rgba(255,255,255,0.9)', border: '1px solid #e5e7eb', padding: '6px 18px', borderRadius: 99, boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }} className="animate-pulse">
+        <div style={{ position: 'absolute', inset: 0, zIndex: 30, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.75)', backdropFilter: 'blur(2px)', gap: 16, pointerEvents: 'none' }}>
+          <svg width="40" height="40" viewBox="0 0 40 40" fill="none" style={{ animation: 'bluemarkSpin 0.9s linear infinite' }}>
+            <circle cx="20" cy="20" r="16" stroke="#e5e7eb" strokeWidth="4" />
+            <path d="M20 4 A16 16 0 0 1 36 20" stroke="#374151" strokeWidth="4" strokeLinecap="round" />
+          </svg>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: '0.12em', color: '#6b7280' }}>
             LOADING...
           </span>
+          <style>{`@keyframes bluemarkSpin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
       {status === 'error' && (

@@ -50,15 +50,28 @@
 
 ### 方法 A：ドラッグ＆ドロップ
 
-ファイル未選択時に表示されるドロップゾーンに、エクスプローラーから `.step` / `.stp` ファイルをドラッグしてください。
+画面上部のドロップゾーンに、エクスプローラーから `.step` / `.stp` ファイルをドラッグしてください。モデル表示中もドロップゾーンは残り、別のファイルをドロップすると表示を切り替えられます。
+
+**標準品質（デフォルト）で即座に読み込みを開始します。**
 
 ### 方法 B：ファイルピッカー
 
-ヘッダー右端の **「ファイルを開く」** ボタンをクリックするか、ドロップゾーンをクリックするとファイル選択ダイアログが開きます。
+ヘッダー右端の **「ファイルを開く」** ボタンをクリックするとファイル選択ダイアログが開きます。
+
+ファイル選択後に **読み込み品質を選ぶダイアログ** が表示されます。
+
+| プリセット | 用途 | `linearDeflection` | `angularDeflection` |
+|-----------|------|-------------------|---------------------|
+| **低品質**（読み込み優先） | 大型モデルの概観確認 | 0.005 | 1.0 rad |
+| **標準**（推奨） | 通常用途 | 0.001（デフォルト） | 0.5 rad（デフォルト） |
+| **高品質**（曲面が滑らか） | 曲面形状の詳細確認 | 0.0003 | 0.2 rad |
+
+> **高品質モードについて：** モデルサイズや形状の複雑さによって処理時間が数十秒かかる場合があります。読み込み中は画面中央にスピナーが表示されます。
 
 ### 方法 C：postMessage（組み込み用）
 
-iFrame として親アプリに埋め込んだ場合、JavaScript の `postMessage` でファイルデータを送ることができます。  
+iFrame として親アプリに埋め込んだ場合、JavaScript の `postMessage` でファイルデータと品質パラメータを送ることができます。
+
 → 詳細は [11. iFrame 組み込み / postMessage API](#11-iframe-組み込み--postmessage-api) を参照
 
 > **対応形式：** `.step` / `.stp` のみ（ISO 10303 STEP ファイル）
@@ -287,6 +300,29 @@ window.addEventListener('message', (e) => {
 | `type` | `string` | 必須 | `"loadStep"` 固定 |
 | `buffer` | `ArrayBuffer` | 必須 | STEP ファイルのバイナリデータ |
 | `name` | `string` | 任意 | ファイル名（省略時: `"model.stp"`） |
+| `linearDeflectionType` | `string` | 任意 | `"bounding_box_ratio"` または `"absolute_value"`（省略時: `"bounding_box_ratio"`） |
+| `linearDeflection` | `number` | 任意 | 線形偏差（省略時: `0.001`）小さいほど高精度 |
+| `angularDeflection` | `number` | 任意 | 角度偏差 rad（省略時: `0.5`）小さいほど曲面が滑らか |
+
+テッセレーション品質の目安：
+
+| プリセット | `linearDeflection` | `angularDeflection` | 用途 |
+|-----------|--------------------|---------------------|------|
+| 低品質 | `0.005` | `1.0` | 大型モデルの概観確認 |
+| 標準（デフォルト） | `0.001` | `0.5` | 通常用途 |
+| 高品質 | `0.0003` | `0.2` | 曲面形状の詳細確認 |
+
+```javascript
+// 高品質で読み込む例
+iframe.contentWindow.postMessage({
+  type: 'loadStep',
+  buffer: arrayBuffer,
+  name: 'model.step',
+  linearDeflectionType: 'bounding_box_ratio',
+  linearDeflection: 0.0003,
+  angularDeflection: 0.2,
+}, '*')
+```
 
 ---
 
@@ -307,4 +343,4 @@ window.addEventListener('message', (e) => {
 
 ---
 
-*BlueMark v1.0 — Beyond the Blueprint*
+*BlueMark v1.1 — Beyond the Blueprint*

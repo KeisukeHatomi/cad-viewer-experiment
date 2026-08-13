@@ -1,4 +1,4 @@
-# BlueMark v1.0
+# BlueMark v1.1
 
 STEP / STP 形式の CAD ファイルをブラウザ上で表示する軽量 3D ビューアです。  
 単体のウェブアプリとして動作するほか、**iFrame 組み込み + postMessage API** によって親アプリからファイルデータを受け取ることもできます。
@@ -51,7 +51,7 @@ npm run preview    # ビルド成果物のプレビュー
 ### スタンドアロン
 
 1. ブラウザでアプリを開く
-2. STEP / STP ファイルをドロップ、またはヘッダの「ファイルを開く」をクリック
+2. STEP / STP ファイルをドロップ、またはヘッダの「ファイルを開く」をクリック（表示中も次のファイルをドロップして切替可能）
 3. マウス操作でモデルを確認
 
 ---
@@ -183,16 +183,37 @@ BlueMark を iFrame として親アプリに埋め込み、postMessage でファ
 | `type` | `string` | 必須 | `"loadStep"` |
 | `buffer` | `ArrayBuffer` | 必須 | STEP ファイルのバイナリデータ |
 | `name` | `string` | 任意 | ファイル名（省略時: `"model.stp"`） |
+| `linearDeflectionType` | `string` | 任意 | `"bounding_box_ratio"` / `"absolute_value"`（省略時: `"bounding_box_ratio"`） |
+| `linearDeflection` | `number` | 任意 | 線形偏差（省略時: `0.001`） |
+| `angularDeflection` | `number` | 任意 | 角度偏差 rad（省略時: `0.5`） |
 
 ```javascript
 const response = await fetch('/path/to/model.step')
 const buffer = await response.arrayBuffer()
 
+// 標準品質（パラメータ省略）
 document.getElementById('cadViewer').contentWindow.postMessage(
   { type: 'loadStep', buffer, name: 'model.step' },
   '*'
 )
+
+// 高品質（曲面が滑らか・処理時間増）
+document.getElementById('cadViewer').contentWindow.postMessage(
+  { type: 'loadStep', buffer, name: 'model.step',
+    linearDeflectionType: 'bounding_box_ratio',
+    linearDeflection: 0.0003,
+    angularDeflection: 0.2 },
+  '*'
+)
 ```
+
+#### テッセレーション品質の目安
+
+| 品質 | `linearDeflection` | `angularDeflection` | 用途 |
+|------|-------------------|---------------------|------|
+| 低品質 | `0.005` | `1.0` | 大型モデルの概観確認 |
+| 標準（デフォルト） | `0.001` | `0.5` | 通常用途 |
+| 高品質 | `0.0003` | `0.2` | 曲面形状の詳細確認 |
 
 ### postMessage API 一覧
 
