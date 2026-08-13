@@ -50,8 +50,101 @@ function ColorRow({ label, value, onChange }) {
   )
 }
 
+// 解像度プリセット定義
+const MESH_PRESETS = [
+  {
+    id: 'low',
+    label: '低品質',
+    sublabel: '読み込み優先',
+    params: { linearDeflectionType: 'bounding_box_ratio', linearDeflection: 0.005, angularDeflection: 1.0 },
+  },
+  {
+    id: 'standard',
+    label: '標準',
+    sublabel: 'バランス（推奨）',
+    params: null, // ライブラリデフォルト
+  },
+  {
+    id: 'high',
+    label: '高品質',
+    sublabel: '曲面が滑らか',
+    params: { linearDeflectionType: 'bounding_box_ratio', linearDeflection: 0.0003, angularDeflection: 0.2 },
+  },
+]
+
+function MeshQualityDialog({ fileName, onConfirm, onCancel }) {
+  const [selected, setSelected] = useState('standard')
+
+  function handleConfirm() {
+    const preset = MESH_PRESETS.find(p => p.id === selected)
+    onConfirm(preset.params)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#ffffff', borderRadius: 12, padding: '24px 28px', width: 320, boxShadow: '0 16px 48px rgba(0,0,0,0.18)', display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {/* タイトル */}
+        <div>
+          <p style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 15, fontWeight: 600, color: '#111827', margin: 0 }}>読み込み品質</p>
+          <p style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: '#9ca3af', margin: '4px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fileName}</p>
+        </div>
+
+        <div style={{ height: 1, background: '#e5e7eb' }} />
+
+        {/* プリセット選択 */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {MESH_PRESETS.map(preset => (
+            <button
+              key={preset.id}
+              onClick={() => setSelected(preset.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                padding: '10px 14px', borderRadius: 8, cursor: 'pointer',
+                border: selected === preset.id ? '1.5px solid #374151' : '1.5px solid #e5e7eb',
+                background: selected === preset.id ? '#f9fafb' : '#ffffff',
+                transition: 'all 120ms', textAlign: 'left',
+              }}
+            >
+              <div style={{
+                width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
+                border: selected === preset.id ? '4px solid #374151' : '1.5px solid #d1d5db',
+                background: '#ffffff',
+                transition: 'all 120ms',
+              }} />
+              <div>
+                <p style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 13, fontWeight: 600, color: '#111827', margin: 0 }}>{preset.label}</p>
+                <p style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: '#9ca3af', margin: '2px 0 0' }}>{preset.sublabel}</p>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ height: 1, background: '#e5e7eb' }} />
+
+        {/* ボタン */}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button
+            onClick={onCancel}
+            style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 13, color: '#6b7280', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 7, padding: '7px 16px', cursor: 'pointer' }}
+          >
+            キャンセル
+          </button>
+          <button
+            onClick={handleConfirm}
+            style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 13, fontWeight: 500, color: '#ffffff', background: '#374151', border: 'none', borderRadius: 7, padding: '7px 20px', cursor: 'pointer' }}
+          >
+            読み込む
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [file, setFile] = useState(null)
+  const [meshParams, setMeshParams] = useState(null) // null = ライブラリデフォルト
+  const [pendingFile, setPendingFile] = useState(null) // ダイアログ表示中の仮ファイル
   const [debugOpen, setDebugOpen] = useState(false)
   const [colors, setColors] = useState(DEFAULT_COLORS)
   const [lights, setLights] = useState(DEFAULT_LIGHTS)
@@ -92,6 +185,12 @@ function App() {
       if (msg.type === 'loadStep') {
         const blob = new Blob([msg.buffer])
         const virtualFile = new File([blob], msg.name || 'model.stp')
+        // tessellation パラメータが含まれていれば保持する
+        const { linearDeflectionType, linearDeflection, angularDeflection } = msg
+        const params = (linearDeflectionType || linearDeflection != null || angularDeflection != null)
+          ? { linearDeflectionType, linearDeflection, angularDeflection }
+          : null
+        setMeshParams(params)
         setFile(virtualFile)
       }
     }
@@ -99,22 +198,50 @@ function App() {
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
-  function handleFileDrop(e) {
+  // ドラッグ＆ドロップ：解像度ダイアログなしで即読み込み
+  function handleDrop(e) {
     e.preventDefault()
-    const f = e.dataTransfer?.files?.[0] || e.target.files?.[0]
-    if (f) setFile(f)
+    const f = e.dataTransfer?.files?.[0]
+    if (f) {
+      setMeshParams(null)
+      setFile(f)
+    }
+  }
+
+  // ファイルピッカー：解像度ダイアログを表示してから読み込む
+  function handlePickerChange(e) {
+    const f = e.target.files?.[0]
+    if (f) setPendingFile(f)
+  }
+
+  function handleDialogConfirm(params) {
+    setMeshParams(params)
+    setFile(pendingFile)
+    setPendingFile(null)
+  }
+
+  function handleDialogCancel() {
+    setPendingFile(null)
   }
 
   const isStep = Boolean(file?.name?.toLowerCase().match(/\.(step|stp)$/))
 
   return (
     <div className="flex flex-col" style={{ height: '100%', background: '#f5f5f5', color: '#1a1a1a' }}>
+      {/* 解像度選択ダイアログ（ファイルピッカー経由のみ表示） */}
+      {pendingFile && (
+        <MeshQualityDialog
+          fileName={pendingFile.name}
+          onConfirm={handleDialogConfirm}
+          onCancel={handleDialogCancel}
+        />
+      )}
       {/* Header */}
       <header style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }} className="px-6 py-3 flex items-center gap-4">
         <div className="flex items-center gap-2">
           <h1 style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 17, fontWeight: 600, color: '#111827', letterSpacing: '-0.01em' }}>BlueMark</h1>
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '0.12em', color: '#9ca3af', textTransform: 'uppercase' }}>Beyond the Blueprint</span>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: '#9ca3af', marginLeft: 6, border: '1px solid #d1d5db', borderRadius: 4, padding: '1px 6px' }}>v1.0</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: '#9ca3af', marginLeft: 6, border: '1px solid #d1d5db', borderRadius: 4, padding: '1px 6px' }}>v1.1</span>
         </div>
         {file && (
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#6b7280', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, padding: '2px 10px' }} className="truncate max-w-xs">
@@ -123,7 +250,7 @@ function App() {
         )}
         {showFileOpen && (
           <div style={{ marginLeft: 'auto' }}>
-            <input id="fileInput" type="file" className="hidden" accept=".step,.stp" onChange={handleFileDrop} />
+            <input id="fileInput" type="file" className="hidden" accept=".step,.stp" onChange={handlePickerChange} />
             <button
               onClick={() => { document.getElementById('fileInput').value = ''; document.getElementById('fileInput').click() }}
               style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 14, fontWeight: 500, color: '#374151', background: '#ffffff', border: '1px solid #d1d5db', borderRadius: 7, padding: '6px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'all 180ms' }}
@@ -140,14 +267,14 @@ function App() {
         )}
       </header>
 
-      {/* Drop zone (ファイル未選択時のみ・fileOpen=false の場合は非表示) */}
-      {!file && showFileOpen && (
+      {/* Drop zone (モデル表示中も次のファイルへ切り替え可能) */}
+      {showFileOpen && (
         <div
           className="m-4 cursor-pointer transition-all"
           style={{ position: 'relative', border: '1px dashed #d1d5db', borderRadius: 10, padding: '28px 24px', textAlign: 'center', background: '#ffffff' }}
           onDragOver={(e) => { e.preventDefault(); e.currentTarget.style.borderColor = '#6b7280'; e.currentTarget.style.background = '#f9fafb' }}
           onDragLeave={(e) => { e.currentTarget.style.borderColor = '#d1d5db'; e.currentTarget.style.background = '#ffffff' }}
-          onDrop={(e) => { e.currentTarget.style.borderColor = '#d1d5db'; e.currentTarget.style.background = '#ffffff'; handleFileDrop(e) }}
+          onDrop={(e) => { e.currentTarget.style.borderColor = '#d1d5db'; e.currentTarget.style.background = '#ffffff'; handleDrop(e) }}
           onClick={() => { document.getElementById('fileInput').value = ''; document.getElementById('fileInput').click() }}
         >
           {[['top:6px;left:6px', 'M0,12 L0,0 L12,0'], ['top:6px;right:6px', 'M0,0 L12,0 L12,12'], ['bottom:6px;left:6px', 'M0,0 L0,12 L12,12'], ['bottom:6px;right:6px', 'M12,0 L12,12 L0,12']].map(([pos, d], i) => (
@@ -155,7 +282,9 @@ function App() {
               <path d={d} stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           ))}
-          <p style={{ color: '#6b7280', fontSize: 15, fontWeight: 500 }}>STEP / STP ファイルをドロップ or クリックして選択</p>
+          <p style={{ color: '#6b7280', fontSize: 15, fontWeight: 500 }}>
+            {file ? '次のSTEP / STP ファイルをドロップ or クリックして選択' : 'STEP / STP ファイルをドロップ or クリックして選択'}
+          </p>
           <p style={{ color: '#9ca3af', fontSize: 12, marginTop: 5, fontFamily: "'JetBrains Mono', monospace" }}>または親アプリから postMessage で受け取ります</p>
         </div>
       )}
@@ -190,7 +319,7 @@ function App() {
             ファイルを選択してください
           </div>
         )}
-        {file && isStep && <StepViewer file={file} colors={colors} lights={lights} />}
+        {file && isStep && <StepViewer file={file} meshParams={meshParams} colors={colors} lights={lights} />}
         {file && !isStep && (
           <div className="h-full flex items-center justify-center" style={{ color: '#ef4444', fontSize: 13 }}>
             対応フォーマット: .step / .stp
