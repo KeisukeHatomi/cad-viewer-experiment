@@ -1,0 +1,41 @@
+.progress-panel {
+  width: 440px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 22px 24px 16px;
+  color: #1a1a1a;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 6%);
+  font-family: 'Noto Sans JP', system-ui, sans-serif;
+  font-size: 13px;
+}
+.progress-panel__steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
+.progress-panel__row { display: grid; grid-template-columns: 22px 100px minmax(32px, 1fr) 44px; align-items: center; gap: 10px; min-height: 22px; }
+.progress-panel__number { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #f3f4f6; color: #9ca3af; font-size: 11px; font-weight: 500; }
+.progress-panel__number svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.progress-panel__label { white-space: nowrap; color: #9ca3af; }
+.progress-panel__value { text-align: right; color: #9ca3af; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.progress-panel__bar { appearance: none; -webkit-appearance: none; display: block; width: 100%; height: 6px; border: 0; border-radius: 999px; overflow: hidden; background: #edf0f4; color: #2563eb; }
+.progress-panel__bar::-webkit-progress-bar { background: #edf0f4; border-radius: 999px; }
+.progress-panel__bar::-webkit-progress-value { background: #2563eb; border-radius: 999px; transition: width 180ms ease-out; }
+.progress-panel__bar::-moz-progress-bar { background: #2563eb; border-radius: 999px; }
+.progress-panel__row--done .progress-panel__number { background: #eff6ff; color: #2563eb; }
+.progress-panel__row--done .progress-panel__label, .progress-panel__row--done .progress-panel__value { color: #6b7280; }
+.progress-panel__row--done .progress-panel__bar::-webkit-progress-value { background: #93b4f4; }
+.progress-panel__row--done .progress-panel__bar::-moz-progress-bar { background: #93b4f4; }
+.progress-panel__row--active .progress-panel__number { background: #2563eb; color: #fff; }
+.progress-panel__row--active .progress-panel__label { color: #1a1a1a; font-weight: 500; }
+.progress-panel__row--active .progress-panel__value { color: #2563eb; }
+.progress-panel__bar:indeterminate { background: linear-gradient(90deg, #edf0f4 0%, #edf0f4 35%, #2563eb 45%, #2563eb 55%, #edf0f4 65%, #edf0f4 100%); background-size: 250% 100%; animation: progress-panel-sweep 1.6s linear infinite; }
+.progress-panel__bar:indeterminate::-webkit-progress-bar { background: transparent; }
+.progress-panel__footer { display: flex; justify-content: flex-end; border-top: 1px solid #f3f4f6; margin-top: 18px; padding-top: 12px; }
+.progress-panel__cancel { border: 1px solid #e5e7eb; border-radius: 6px; padding: 5px 14px; font: inherit; font-size: 12px; color: #6b7280; background: #fff; cursor: pointer; }
+.progress-panel__cancel:hover { color: #1a1a1a; border-color: #d1d5db; background: #fafafa; }
+.progress-panel__cancel:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.progress-panel--compact { width: 380px; padding: 16px 18px; }
+.progress-panel--compact .progress-panel__row { grid-template-columns: 108px minmax(32px, 1fr) 44px; }
+@keyframes progress-panel-sweep { from { background-position: 100% 0; } to { background-position: 0% 0; } }
+@media (prefers-reduced-motion: reduce) { .progress-panel__bar:indeterminate { animation: none; background-position: 50% 0; } .progress-panel__bar::-webkit-progress-value { transition: none; } }
+@media (max-width: 480px) { .progress-panel { padding: 18px 14px 14px; } .progress-panel__row { grid-template-columns: 20px 92px minmax(24px, 1fr) 42px; gap: 7px; } }

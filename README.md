@@ -1,4 +1,4 @@
-# BlueMark v1.1
+# STEP Viewer v1.1
 
 STEP / STP 形式の CAD ファイルをブラウザ上で表示する軽量 3D ビューアです。  
 単体のウェブアプリとして動作するほか、**iFrame 組み込み + postMessage API** によって親アプリからファイルデータを受け取ることもできます。
@@ -261,3 +261,7 @@ BluePrint/
 | 環境光 | 1.0 |
 | キーライト | 2.0 |
 | フィルライト | 1.0 |
+
+## Engine source and licenses
+
+The viewer uses modified occt-import-js and Open CASCADE Technology. [Notices](public/licenses/README.txt), [corresponding source and build recipe](public/source/occt-engine-source.tar.gz), and [validation / limitations](tools/README.md). No CAD sample files are distributed.

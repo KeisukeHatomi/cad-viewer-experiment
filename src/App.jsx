@@ -68,7 +68,7 @@ const MESH_PRESETS = [
     id: 'high',
     label: '高品質',
     sublabel: '曲面が滑らか',
-    params: { linearDeflectionType: 'bounding_box_ratio', linearDeflection: 0.0003, angularDeflection: 0.2 },
+    params: { linearDeflectionType: 'absolute_value', linearDeflection: 0.3, angularDeflection: 0.2, retryMissingFaces: false },
   },
 ]
 
@@ -180,15 +180,14 @@ function App() {
   useEffect(() => {
     function onMessage(e) {
       const msg = e.data
-      if (!msg) return
+      if (!msg || e.source !== window.parent) return
       if (!(msg.buffer instanceof ArrayBuffer)) return
       if (msg.type === 'loadStep') {
-        const blob = new Blob([msg.buffer])
-        const virtualFile = new File([blob], msg.name || 'model.stp')
+        const virtualFile = { buffer: msg.buffer, size: msg.buffer.byteLength, name: msg.name || 'model.stp', requestId: msg.requestId, parentOrigin: e.origin }
         // tessellation パラメータが含まれていれば保持する
-        const { linearDeflectionType, linearDeflection, angularDeflection } = msg
+        const { linearDeflectionType, linearDeflection, angularDeflection, retryMissingFaces } = msg
         const params = (linearDeflectionType || linearDeflection != null || angularDeflection != null)
-          ? { linearDeflectionType, linearDeflection, angularDeflection }
+          ? { linearDeflectionType, linearDeflection, angularDeflection, retryMissingFaces }
           : null
         setMeshParams(params)
         setFile(virtualFile)
@@ -238,11 +237,6 @@ function App() {
       )}
       {/* Header */}
       <header style={{ background: '#ffffff', borderBottom: '1px solid #e5e7eb', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }} className="px-6 py-3 flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <h1 style={{ fontFamily: "'Noto Sans JP', sans-serif", fontSize: 17, fontWeight: 600, color: '#111827', letterSpacing: '-0.01em' }}>BlueMark</h1>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '0.12em', color: '#9ca3af', textTransform: 'uppercase' }}>Beyond the Blueprint</span>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: '#9ca3af', marginLeft: 6, border: '1px solid #d1d5db', borderRadius: 4, padding: '1px 6px' }}>v1.1</span>
-        </div>
         {file && (
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#6b7280', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 6, padding: '2px 10px' }} className="truncate max-w-xs">
             {file.name}

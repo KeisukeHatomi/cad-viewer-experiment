@@ -24,3 +24,11 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Local CAD files and deployment credentials
+*.[sS][tT][pP]
+*.[sS][tT][eE][pP]
+*.[dD][xX][fF]
+.env
+.env.*
+.vercel

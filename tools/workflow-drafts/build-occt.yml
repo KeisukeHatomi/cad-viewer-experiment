@@ -1,0 +1,37 @@
+name: Build STEP conversion engine
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wasm:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Emscripten 3.1.69
+        shell: bash
+        run: |
+          git clone --depth 1 --branch 3.1.69 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 3.1.69
+          "$RUNNER_TEMP/emsdk/emsdk" activate 3.1.69
+      - name: Verify bounded numeric export
+        shell: bash
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          em++ tools/test-array-writer.cpp --bind -O1 -o "$RUNNER_TEMP/test-array-writer.js"
+          node "$RUNNER_TEMP/test-array-writer.js"
+      - name: Build from pinned OCCT sources
+        shell: bash
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          pwsh -NoProfile -File tools/build-occt.ps1 -BuildDirectory "$RUNNER_TEMP/occt-build" -Jobs 3
+          mkdir -p engine-artifact
+          cp "$RUNNER_TEMP/occt-build/wasm/Release/occt-import-js."{js,wasm} engine-artifact/
+          tar --exclude=.git --exclude='*.stp' --exclude='*.step' --exclude='*.STP' --exclude='*.STEP' -czf engine-artifact/source.tar.gz -C "$RUNNER_TEMP/occt-build" source
+          sha256sum engine-artifact/* > engine-artifact/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: occt-0.0.23-memory4gb
+          path: engine-artifact/
+          retention-days: 14

@@ -6,6 +6,11 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
+import { importStep, clearStepCache } from '../lib/importStep'
+import LoadingProgress from './LoadingProgress'
+import DetailProgress from './DetailProgress'
+import ViewerNotices from './ViewerNotices'
+import { prepareCadEdges } from '../lib/prepareCadEdges.js'
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js'
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
@@ -89,6 +94,16 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
   const mountRef = useRef(null)
   const [status, setStatus] = useState('idle') // 'idle'|'loading'|'ok'|'error'
   const [errorMsg, setErrorMsg] = useState('')
+  const [progress, setProgress] = useState({ phase: 'engine' })
+  const [notice, setNotice] = useState('')
+  const [cacheStatus, setCacheStatus] = useState('')
+  const [clearingCache, setClearingCache] = useState(false)
+  const [preparingDetails, setPreparingDetails] = useState(false)
+  const [detailProgress, setDetailProgress] = useState(null)
+  const detailBusyRef = useRef(false)
+  const cancelRef = useRef(null)
+  const detailsRef = useRef(null)
+  const holesRef = useRef(null)
 
   // モード: navigate / measure / comment
   const [mode, setMode] = useState('navigate')
@@ -280,11 +295,33 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
     if (!file || !mountRef.current) return
 
     let cancelled = false
+    let contextLost = false
+    const importedFaces = brepFacesMapRef.current
+    const controller = new AbortController()
+    cancelRef.current = () => controller.abort()
+    const yieldFrame = async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      if (cancelled || controller.signal.aborted) throw new DOMException('読み込みを中止しました', 'AbortError')
+    }
+    const report = data => {
+      if (cancelled) return
+      setProgress(data)
+      if (file.parentOrigin && file.parentOrigin !== 'null') window.parent.postMessage({ ...data, type: 'stepProgress', requestId: file.requestId }, file.parentOrigin)
+    }
+    const largeFile = file.size >= 100 * 1024 * 1024
+    setNotice('')
+    setCacheStatus('')
+    setPreparingDetails(false)
+    setDetailProgress(null)
+    detailBusyRef.current = false
+    detailsRef.current = null
+    holesRef.current = null
     let animId = null
 
     setMode('navigate')
     modeRef.current = 'navigate'
-    setDisplayMode('shaded-edges')
+    setDisplayMode(largeFile ? 'shaded' : 'shaded-edges')
+    displayModeRef.current = largeFile ? 'shaded' : 'shaded-edges'
     solidGroupRef.current      = null
     edgeGroupRef.current       = null
     ridgeGroupRef.current      = null
@@ -309,10 +346,19 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
     // --- WebGL レンダラー ---
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setSize(W, H)
-    renderer.setPixelRatio(window.devicePixelRatio)
+    renderer.setPixelRatio(largeFile ? Math.min(window.devicePixelRatio, 1.5) : window.devicePixelRatio)
     renderer.outputColorSpace = THREE.SRGBColorSpace
     container.appendChild(renderer.domElement)
     rendererRef.current = renderer
+    const onContextLost = event => {
+      event.preventDefault()
+      contextLost = true
+      controller.abort()
+      setStatus('error')
+      setErrorMsg('描画用メモリが不足したか、描画処理が停止しました。ファイルを選び直して再試行してください。')
+      report({ phase: 'error', message: '描画処理が停止しました。再試行してください。' })
+    }
+    renderer.domElement.addEventListener('webglcontextlost', onContextLost)
 
     // --- CSS2D レンダラー（測定ラベル・コメントピン用）---
     const labelRenderer = new CSS2DRenderer()
@@ -1061,20 +1107,8 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
     renderer.domElement.addEventListener('mouseup', onMouseUp)
     renderer.domElement.addEventListener('wheel', onWheelZoom, { capture: true, passive: false })
 
-    // --- STEP モデルロード（occt-import-js をスクリプトタグで動的ロード）---
-    // Vite の ESM/WASM モジュール処理を完全に回避するため script タグで読み込む
-    async function loadOcct() {
-      if (window.occtimportjs) return window.occtimportjs
-      return new Promise((resolve, reject) => {
-        const s = document.createElement('script')
-        s.src = '/occt-import-js.js'
-        s.onload = () => resolve(window.occtimportjs)
-        s.onerror = reject
-        document.head.appendChild(s)
-      })
-    }
-
     async function run() {
+      const loadStarted = performance.now()
       try {
         setStatus('loading')
         // 前回の解析結果・コメントをクリア
@@ -1084,26 +1118,14 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         setHoleInfo(null)
         setShowHolePanel(false)
 
-        // ローディング UI を確実にレンダリングしてから WASM を起動する
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-
-        const initOcct = await loadOcct()
-        const occt = await initOcct({
-          locateFile: (name) => `/${name}`,
-        })
-
-        if (cancelled) return
-
-        const buffer = await file.arrayBuffer()
-
-        // WASM はメインスレッドをブロックするため、直前に再度フレームを譲る
-        await new Promise(resolve => requestAnimationFrame(resolve))
-
-        const result = occt.ReadStepFile(new Uint8Array(buffer), meshParams ?? null)
-
-        if (!result.success) {
-          throw new Error('STEP ファイルの解析に失敗しました')
-        }
+        // Let a superseded effect (including StrictMode replay) abort before transferring ownership.
+        await yieldFrame()
+        const result = await importStep(file, meshParams, { signal: controller.signal, onProgress: report })
+        await yieldFrame()
+        setCacheStatus(result.cacheHit ? '端末内の保存データから表示しました。' : result.cacheStored ? '次回の読み込み用に、このモデルを端末内へ保存しました。' : '端末内の保存は利用できません。次回は再変換します。')
+        if (result.missingParts?.length) console.warn('STEP conversion omissions', JSON.stringify(result.missingParts))
+        if (result.emptyMeshes || result.emptyFaces) setNotice(result.emptyMeshes + ' 個の形状・' + result.emptyFaces + ' 面を生成できず、一部を表示できていません。')
+        report({ phase: 'geometry', cacheHit: result.cacheHit, loaded: 0, total: result.meshes.length })
 
         // CAD 的な白系マテリアル（デフォルト）
         const material = new THREE.MeshPhongMaterial({
@@ -1123,19 +1145,22 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         const meshes = []
         const geoList = []  // エッジ検出用にまとめる
 
+        let prepared = 0
         for (const mesh of result.meshes) {
+          if (prepared % 20 === 0) { report({ phase: 'geometry', cacheHit: result.cacheHit, loaded: prepared, total: result.meshes.length }); await yieldFrame() }
+          prepared++
           const geo = new THREE.BufferGeometry()
 
           geo.setAttribute('position',
-            new THREE.BufferAttribute(new Float32Array(mesh.attributes.position.array), 3))
+            new THREE.BufferAttribute(mesh.attributes.position.array, 3))
 
           if (mesh.attributes.normal) {
             geo.setAttribute('normal',
-              new THREE.BufferAttribute(new Float32Array(mesh.attributes.normal.array), 3))
+              new THREE.BufferAttribute(mesh.attributes.normal.array, 3))
           }
 
           if (mesh.index) {
-            geo.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.index.array), 1))
+            geo.setIndex(new THREE.BufferAttribute(mesh.index.array, 1))
           }
 
           if (!mesh.attributes.normal) {
@@ -1176,7 +1201,34 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         edgeMatRef.current  = edgeMat
         ridgeMatRef.current = ridgeMat
 
-        if (geoList.length > 0) {
+        let edgesReady = false
+        const prepareEdges = async () => {
+          if (edgesReady) return
+          const edgeStarted = performance.now()
+          if (result.meshes.every(mesh => mesh.brep_faces?.length)) {
+            const chunks = []
+            let length = 0
+            await prepareCadEdges(result.meshes, {
+              signal: controller.signal,
+              onProgress: (completed, total) => {
+                if (!cancelled && (completed % 20 === 0 || completed === total)) setDetailProgress(current => current && ({ ...current, completed, total }))
+              },
+              onMesh: positions => { chunks.push(positions); length += positions.length },
+            })
+            const positions = new Float32Array(length)
+            let offset = 0
+            for (const chunk of chunks) { positions.set(chunk, offset); offset += chunk.length }
+            const geometry = new THREE.BufferGeometry()
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+            ridgeGroup.add(new THREE.LineSegments(geometry, ridgeMat))
+          } else if (largeFile || result.triangles > 1000000) {
+            // Fallback for geometry without CAD face metadata.
+            for (let i = 0; i < geoList.length; i++) {
+              if (i % 10 === 0) await yieldFrame()
+              const edges = new THREE.EdgesGeometry(geoList[i], 15)
+              ridgeGroup.add(new THREE.LineSegments(edges, ridgeMat))
+            }
+          } else if (geoList.length > 0) {
           // グループ付きでマージ → 頂点統合
           const merged = mergeGeometries(geoList, true)  // useGroups=true でメッシュ境界を保持
           const welded = mergeVertices(merged, 1e-4)
@@ -1298,6 +1350,22 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
           welded.dispose()
         }
 
+          edgesReady = true
+          console.info('STEP_METRICS', JSON.stringify({ phase: 'edges', elapsedMs: Math.round(performance.now() - edgeStarted), meshes: result.meshes.length, triangles: result.triangles }))
+        }
+        detailsRef.current = async key => {
+          if (detailBusyRef.current) return
+          if (edgesReady) { setDisplayMode(key); return }
+          detailBusyRef.current = true
+          setPreparingDetails(true)
+          setDetailProgress({ kind: 'edges', label: 'エッジ表示を準備中', completed: 0, total: result.meshes.length })
+          try { await yieldFrame(); await prepareEdges(); await yieldFrame(); setDisplayMode(key) }
+          catch (error) { if (!cancelled && !controller.signal.aborted) setNotice(current => [current, error.message].filter(Boolean).join(' ')) }
+          finally { if (!cancelled) { detailBusyRef.current = false; setPreparingDetails(false); setDetailProgress(null) } }
+        }
+        if (!largeFile && result.triangles <= 1000000) await prepareEdges()
+        else { setDisplayMode('shaded'); displayModeRef.current = 'shaded' }
+
         edgeGroup.visible   = false
         ridgeGroup.visible  = false
         hlBaseGroup.visible = false
@@ -1319,6 +1387,7 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         const box = new THREE.Box3().setFromObject(group)
         const center = box.getCenter(new THREE.Vector3())
         const size = box.getSize(new THREE.Vector3()).length()
+        if (!Number.isFinite(size) || size <= 0 || ![...box.min.toArray(), ...box.max.toArray()].every(Number.isFinite)) throw new Error('表示範囲を計算できない形状です。')
         modelSizeRef.current = size
 
         // 等角投影の視野をモデルサイズに合わせて設定
@@ -1345,16 +1414,37 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         controls.update()
 
         applyDisplayMode(displayModeRef.current)
+        report({ phase: 'rendering', cacheHit: result.cacheHit })
+        await yieldFrame()
+        renderer.render(scene, camera)
+        if (renderer.getContext().isContextLost()) throw new Error('描画用メモリを確保できませんでした。')
+        await new Promise(resolve => requestAnimationFrame(resolve))
+        if (cancelled || controller.signal.aborted) return
         setStatus('ok')
+        report({ phase: 'done', triangles: result.triangles, cacheHit: result.cacheHit })
+        console.info('STEP_METRICS', JSON.stringify({ phase: 'display-ready', elapsedMs: Math.round(performance.now() - loadStarted), triangles: result.triangles, wasmBytes: result.wasmBytes, cacheHit: result.cacheHit, cacheStored: result.cacheStored }))
 
-        // 穴・円筒面の自動解析
-        const cylResult = analyzeCylinders()
-        if (cylResult.length > 0) {
-          createHoleAnnotations(cylResult)
-          setHoleInfo(cylResult)
+        holesRef.current = async () => {
+          if (detailBusyRef.current) return
+          detailBusyRef.current = true
+          setPreparingDetails(true)
+          setDetailProgress({ kind: 'holes', label: '穴・円筒面を解析中' })
+          try {
+            const cylResult = await analyzeCylinders(yieldFrame)
+            await yieldFrame()
+            setHoleInfo(cylResult)
+            if (cylResult.length > 0) createHoleAnnotations(cylResult)
+            else setNotice(current => [current, '穴・円筒面は検出されませんでした。'].filter(Boolean).join(' '))
+          } catch (error) { if (!cancelled && !controller.signal.aborted) setNotice(current => [current, error.message].filter(Boolean).join(' ')) }
+          finally { if (!cancelled) { detailBusyRef.current = false; setPreparingDetails(false); setDetailProgress(null) } }
         }
+        if (!largeFile && result.triangles <= 1000000) await holesRef.current()
       } catch (e) {
-        if (!cancelled) { setStatus('error'); setErrorMsg(e.message || String(e)) }
+        if (!cancelled && !contextLost) {
+          setStatus(e.name === 'AbortError' ? 'cancelled' : 'error')
+          setErrorMsg(e.name === 'AbortError' ? '読み込みを中止しました。ファイルを選び直して再試行できます。' : e.message || String(e))
+          report({ phase: e.name === 'AbortError' ? 'cancelled' : 'error', message: e.message || String(e) })
+        }
       }
     }
 
@@ -1362,6 +1452,11 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
 
     return () => {
       cancelled = true
+      controller.abort()
+      cancelRef.current = null
+      detailsRef.current = null
+      holesRef.current = null
+      renderer.domElement.removeEventListener('webglcontextlost', onContextLost)
       ro.disconnect()
       cancelAnimationFrame(animId)
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
@@ -1409,6 +1504,15 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         })
       })
       dimObjects.clear()
+      const geometries = new Set(), materials = new Set()
+      scene.traverse(object => {
+        if (object.geometry) geometries.add(object.geometry)
+        if (object.material) (Array.isArray(object.material) ? object.material : [object.material]).forEach(m => materials.add(m))
+      })
+      geometries.forEach(geometry => geometry.dispose())
+      materials.forEach(material => material.dispose())
+      meshesRef.current = []
+      importedFaces.clear()
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode === container) container.removeChild(renderer.domElement)
@@ -1478,8 +1582,9 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
   }
 
   // --- 円筒面解析（穴径検出）---
-  function analyzeCylinders() {
+  async function analyzeCylinders(yieldFrame) {
     const cylinders = []
+    let lastYield = performance.now()
 
     for (const [meshObj, brepFaces] of brepFacesMapRef.current) {
       const geo = meshObj.geometry
@@ -1489,6 +1594,10 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
       if (!posAttr || !normAttr) continue
 
       for (const face of brepFaces) {
+        if (performance.now() - lastYield >= 12) {
+          await yieldFrame()
+          lastYield = performance.now()
+        }
         const triCount = face.last - face.first + 1
         if (triCount < 4) continue
 
@@ -1726,7 +1835,7 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         div.addEventListener('mousedown', (e) => {
           if (e.button !== 0) {
             // 右クリック等はパンのために下のcanvasへイベントを転送
-            renderer.domElement.dispatchEvent(new MouseEvent('mousedown', e))
+            rendererRef.current?.domElement.dispatchEvent(new MouseEvent('mousedown', e))
             return
           }
           e.stopPropagation()
@@ -1970,7 +2079,7 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
     div.addEventListener('mousedown', (e) => {
       if (e.button !== 0) {
         // 右クリック等はパンのために下のcanvasへイベントを転送
-        renderer.domElement.dispatchEvent(new MouseEvent('mousedown', e))
+        rendererRef.current?.domElement.dispatchEvent(new MouseEvent('mousedown', e))
         return
       }
       e.stopPropagation()
@@ -2209,7 +2318,7 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
     div.addEventListener('mousedown', (e) => {
       if (e.button !== 0) {
         // 右クリック等はパンのために下のcanvasへイベントを転送
-        renderer.domElement.dispatchEvent(new MouseEvent('mousedown', e))
+        rendererRef.current?.domElement.dispatchEvent(new MouseEvent('mousedown', e))
         return
       }
       if (div._editing) return
@@ -2495,7 +2604,9 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
             <button
               key={key}
               title={label}
-              onClick={() => setDisplayMode(key)}
+              disabled={preparingDetails}
+              aria-busy={preparingDetails}
+              onClick={() => key === 'shaded' ? setDisplayMode(key) : detailsRef.current?.(key)}
               style={displayMode === key
                 ? { background: '#f3f4f6', color: '#111827', border: '1px solid #d1d5db', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }
                 : { background: 'transparent', color: '#9ca3af', border: '1px solid transparent', borderRadius: 7, padding: '6px 8px', cursor: 'pointer', transition: 'all 180ms', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
@@ -2582,22 +2693,21 @@ export default function StepViewer({ file, meshParams, colors, lights }) {
         </div>
       )}
 
-      {/* ローディングオーバーレイ */}
-      {status === 'loading' && (
-        <div style={{ position: 'absolute', inset: 0, zIndex: 30, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.75)', backdropFilter: 'blur(2px)', gap: 16, pointerEvents: 'none' }}>
-          <svg width="40" height="40" viewBox="0 0 40 40" fill="none" style={{ animation: 'bluemarkSpin 0.9s linear infinite' }}>
-            <circle cx="20" cy="20" r="16" stroke="#e5e7eb" strokeWidth="4" />
-            <path d="M20 4 A16 16 0 0 1 36 20" stroke="#374151" strokeWidth="4" strokeLinecap="round" />
-          </svg>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: '0.12em', color: '#6b7280' }}>
-            LOADING...
-          </span>
-          <style>{`@keyframes bluemarkSpin { to { transform: rotate(360deg); } }`}</style>
-        </div>
+      {status === 'ok' && detailProgress && <DetailProgress progress={detailProgress} />}
+      {status === 'loading' && <LoadingProgress progress={progress} onCancel={() => cancelRef.current?.()} />}
+      {status === 'ok' && (
+        <ViewerNotices notice={notice} cacheStatus={cacheStatus} clearingCache={clearingCache}
+          canAnalyze={!preparingDetails && !holeInfo} onAnalyze={() => holesRef.current?.()}
+          onClearCache={async () => {
+            setClearingCache(true)
+            try { await clearStepCache(); setCacheStatus('端末内の保存データを削除しました。') }
+            catch { setCacheStatus('保存データを削除できませんでした。再度お試しください。') }
+            finally { setClearingCache(false) }
+          }} />
       )}
-      {status === 'error' && (
+      {(status === 'error' || status === 'cancelled') && (
         <div className="absolute inset-0 flex flex-col items-center justify-center z-10 p-8">
-          <p style={{ color: '#ef4444', fontWeight: 600, marginBottom: 8 }}>読み込みエラー</p>
+          <p style={{ color: '#ef4444', fontWeight: 600, marginBottom: 8 }}>{status === 'cancelled' ? '読み込みを中止しました' : '読み込みエラー'}</p>
           <p style={{ color: '#6b7280', fontSize: 12, textAlign: 'center', wordBreak: 'break-all', fontFamily: "'JetBrains Mono', monospace" }}>{errorMsg}</p>
         </div>
       )}

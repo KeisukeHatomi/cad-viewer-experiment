@@ -8,3 +8,6 @@
 *.jpeg binary
 *.ico  binary
 *.svg  binary
+
+# Keep the verified engine artifact byte-identical across checkouts
+public/occt-import-js.js text eol=lf
